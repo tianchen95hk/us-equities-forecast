@@ -129,7 +129,7 @@ Endpoints:
 
 ## OpenClaw Quick Deploy
 
-Clone/pull + venv + dependencies + run in one script:
+Clone/pull + install dependencies + run in one script (default: **no venv**):
 
 ```bash
 bash scripts/openclaw_install_and_run.sh
@@ -142,6 +142,18 @@ REPO_DIR=$HOME/us-equities-forecast \
 PYTHON_BIN=python3.11 \
 RUN_ARGS="--live --output-style simple --output-lang zh" \
 bash scripts/openclaw_install_and_run.sh
+```
+
+Enable venv only when you explicitly want it:
+
+```bash
+USE_VENV=true bash scripts/openclaw_install_and_run.sh
+```
+
+If you want non-user global pip install in no-venv mode:
+
+```bash
+PIP_USER_INSTALL=false bash scripts/openclaw_install_and_run.sh
 ```
 
 ## Artifacts and Storage
