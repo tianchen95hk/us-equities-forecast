@@ -70,6 +70,12 @@ def _load_market_data_file(path: str) -> list[dict[str, Any]]:
     return payload
 
 
+def _save_market_data_file(path: str, payload: list[dict[str, Any]]) -> None:
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _last_two_non_null(values: list[Any]) -> tuple[float, float] | None:
     filtered = [float(value) for value in values if value is not None]
     if len(filtered) < 2:
@@ -330,9 +336,20 @@ def collect_market_data(settings: Settings, manual_path: str | None = None) -> t
         try:
             live_market_data, source = _fetch_live_market_data(settings)
             if live_market_data:
+                try:
+                    _save_market_data_file(settings.latest_market_cache_file, live_market_data)
+                except OSError:
+                    pass
                 return live_market_data, source
         except CollectorError:
             # Intentional fallback to maintain local run reliability.
+            pass
+
+        try:
+            latest_cached_market = _load_market_data_file(settings.latest_market_cache_file)
+            if latest_cached_market:
+                return latest_cached_market, "latest_available_cache"
+        except CollectorError:
             pass
 
     return _load_market_data_file(settings.mock_market_file), "mock"

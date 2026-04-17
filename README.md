@@ -21,6 +21,9 @@ The system is explicitly designed to avoid hindsight bias and price-target logic
   - news <= 72 hours
   - market indicators <= 60 minutes
   - overridable per run via CLI/API.
+- Latest-available fallback (default enabled):
+  - if freshness gate is exceeded but data exists, pipeline can continue with latest available inputs
+  - fallback still enforces a hard cap (`LATEST_AVAILABLE_MAX_*`) to prevent very old data.
 
 ### Strict 3-Call LLM Chain
 
@@ -116,6 +119,12 @@ Disable freshness hard gate for one run:
 python -m app.main run --disable-freshness-gate
 ```
 
+If you want strict rejection (disable latest-available fallback), set in `.env`:
+
+```env
+ALLOW_LATEST_AVAILABLE_FALLBACK=false
+```
+
 ## Optional API
 
 ```bash
@@ -164,6 +173,7 @@ Each run writes separated artifacts:
 - `artifacts/<run_id>/raw/market_indicators_raw.json`
 - `artifacts/<run_id>/intermediate/normalized_inputs.json`
 - `artifacts/<run_id>/intermediate/input_freshness_report.json`
+- optional fallback marker: `artifacts/<run_id>/intermediate/input_latest_available_fallback.json`
 - `artifacts/<run_id>/intermediate/structured_events.json`
 - `artifacts/<run_id>/intermediate/state_mapping.json`
 - `artifacts/<run_id>/intermediate/forecast_draft.json`

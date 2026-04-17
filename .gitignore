@@ -16,6 +16,7 @@ venv/
 # Runtime artifacts
 artifacts/
 data/forecast.db
+data/cache/
 
 # Logs
 *.log

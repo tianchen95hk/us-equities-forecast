@@ -17,7 +17,7 @@ from app.pipeline.publish_forecast import select_publishable_forecast
 from app.pipeline.review_forecast import run_anti_hindsight_review
 from app.rules.schema_check import build_rule_report, validate_forecast_rules
 from app.rules.validators import repair_forecast_payload
-from app.schemas import AntiHindsightStatus, FinalForecast, RuleCheckReport
+from app.schemas import AntiHindsightStatus, FinalForecast, InputFreshnessReport, RuleCheckReport
 from app.storage.db import Storage
 from app.utils.prompt_loader import PromptLoader
 
@@ -49,6 +49,45 @@ class PipelineDependencies:
 
 def _rule_issues_to_reasons(rule_report: RuleCheckReport) -> list[str]:
     return [f"{item.code}: {item.message}" for item in rule_report.issues]
+
+
+def _can_use_latest_available_fallback(
+    freshness_report: InputFreshnessReport,
+    settings: Settings,
+) -> tuple[bool, list[str]]:
+    if freshness_report.news_items_checked == 0:
+        return False, ["Latest-available fallback unavailable: no news items found"]
+    if freshness_report.market_items_checked == 0:
+        return False, ["Latest-available fallback unavailable: no market items found"]
+
+    reasons: list[str] = []
+
+    news_age_cap_minutes = settings.latest_available_max_news_age_hours * 60
+    market_age_cap_minutes = settings.latest_available_max_market_age_minutes
+
+    too_old_news = [
+        item
+        for item in freshness_report.stale_news
+        if news_age_cap_minutes > 0 and item.age_minutes > news_age_cap_minutes
+    ]
+    too_old_market = [
+        item
+        for item in freshness_report.stale_market
+        if market_age_cap_minutes > 0 and item.age_minutes > market_age_cap_minutes
+    ]
+
+    if too_old_news:
+        reasons.append(
+            f"Latest-available fallback denied: {len(too_old_news)} news items exceed "
+            f"{news_age_cap_minutes:.1f} minutes cap"
+        )
+    if too_old_market:
+        reasons.append(
+            f"Latest-available fallback denied: {len(too_old_market)} market items exceed "
+            f"{market_age_cap_minutes:.1f} minutes cap"
+        )
+
+    return (len(reasons) == 0), reasons
 
 
 def run_pipeline(
@@ -85,6 +124,7 @@ def run_pipeline(
         if enforce_input_freshness is None
         else enforce_input_freshness
     )
+    allow_latest_available_fallback = settings.allow_latest_available_fallback
 
     run_id = storage.create_run(forecast_horizon=horizon, market_universe=universe)
     artifact_paths: dict[str, str] = {}
@@ -140,38 +180,92 @@ def run_pipeline(
             )
         )
         if freshness_gate_enabled and freshness_report.has_blocking_issues:
-            rejection_reasons: list[str] = [freshness_report.summary]
-            rejection_reasons.extend(
-                f"STALE_NEWS: {item.key} age={item.age_minutes:.1f}m "
-                f"limit={item.threshold_minutes:.1f}m"
-                for item in freshness_report.stale_news[:5]
-            )
-            rejection_reasons.extend(
-                f"STALE_MARKET: {item.key} age={item.age_minutes:.1f}m "
-                f"limit={item.threshold_minutes:.1f}m"
-                for item in freshness_report.stale_market[:5]
-            )
-            artifact_paths["input_rejected"] = str(
-                storage.save_artifact(
-                    run_id,
-                    stage="final",
-                    artifact_name="input_rejected.json",
-                    payload={
-                        "publish_status": "rejected",
-                        "rejection_reasons": rejection_reasons,
-                        "freshness_gate_enabled": freshness_gate_enabled,
-                        "input_freshness_report": freshness_report.model_dump(mode="json"),
-                    },
+            if allow_latest_available_fallback:
+                fallback_allowed, fallback_reasons = _can_use_latest_available_fallback(
+                    freshness_report=freshness_report,
+                    settings=settings,
                 )
-            )
-            storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
-            return PipelineResult(
-                run_id=run_id,
-                final_forecast=None,
-                artifact_paths=artifact_paths,
-                publish_status="rejected",
-                rejection_reasons=rejection_reasons,
-            )
+                if fallback_allowed:
+                    artifact_paths["input_latest_available_fallback"] = str(
+                        storage.save_artifact(
+                            run_id,
+                            stage="intermediate",
+                            artifact_name="input_latest_available_fallback.json",
+                            payload={
+                                "applied": True,
+                                "reason": "Freshness gate exceeded but latest-available fallback allowed",
+                                "input_freshness_report": freshness_report.model_dump(mode="json"),
+                            },
+                        )
+                    )
+                else:
+                    rejection_reasons: list[str] = [freshness_report.summary, *fallback_reasons]
+                    rejection_reasons.extend(
+                        f"STALE_NEWS: {item.key} age={item.age_minutes:.1f}m "
+                        f"limit={item.threshold_minutes:.1f}m"
+                        for item in freshness_report.stale_news[:5]
+                    )
+                    rejection_reasons.extend(
+                        f"STALE_MARKET: {item.key} age={item.age_minutes:.1f}m "
+                        f"limit={item.threshold_minutes:.1f}m"
+                        for item in freshness_report.stale_market[:5]
+                    )
+                    artifact_paths["input_rejected"] = str(
+                        storage.save_artifact(
+                            run_id,
+                            stage="final",
+                            artifact_name="input_rejected.json",
+                            payload={
+                                "publish_status": "rejected",
+                                "rejection_reasons": rejection_reasons,
+                                "freshness_gate_enabled": freshness_gate_enabled,
+                                "allow_latest_available_fallback": allow_latest_available_fallback,
+                                "input_freshness_report": freshness_report.model_dump(mode="json"),
+                            },
+                        )
+                    )
+                    storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
+                    return PipelineResult(
+                        run_id=run_id,
+                        final_forecast=None,
+                        artifact_paths=artifact_paths,
+                        publish_status="rejected",
+                        rejection_reasons=rejection_reasons,
+                    )
+            else:
+                rejection_reasons = [freshness_report.summary]
+                rejection_reasons.extend(
+                    f"STALE_NEWS: {item.key} age={item.age_minutes:.1f}m "
+                    f"limit={item.threshold_minutes:.1f}m"
+                    for item in freshness_report.stale_news[:5]
+                )
+                rejection_reasons.extend(
+                    f"STALE_MARKET: {item.key} age={item.age_minutes:.1f}m "
+                    f"limit={item.threshold_minutes:.1f}m"
+                    for item in freshness_report.stale_market[:5]
+                )
+                artifact_paths["input_rejected"] = str(
+                    storage.save_artifact(
+                        run_id,
+                        stage="final",
+                        artifact_name="input_rejected.json",
+                        payload={
+                            "publish_status": "rejected",
+                            "rejection_reasons": rejection_reasons,
+                            "freshness_gate_enabled": freshness_gate_enabled,
+                            "allow_latest_available_fallback": allow_latest_available_fallback,
+                            "input_freshness_report": freshness_report.model_dump(mode="json"),
+                        },
+                    )
+                )
+                storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
+                return PipelineResult(
+                    run_id=run_id,
+                    final_forecast=None,
+                    artifact_paths=artifact_paths,
+                    publish_status="rejected",
+                    rejection_reasons=rejection_reasons,
+                )
 
         event_extraction_prompt = prompt_loader.load("event_extraction.txt")
         structured_events = run_event_extraction(

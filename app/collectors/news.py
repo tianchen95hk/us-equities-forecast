@@ -27,6 +27,12 @@ def _load_news_file(path: str) -> list[dict[str, Any]]:
     return payload
 
 
+def _save_news_file(path: str, payload: list[dict[str, Any]]) -> None:
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _fetch_live_news(settings: Settings) -> list[dict[str, Any]]:
     if not settings.news_api_key:
         raise CollectorError("NEWS_API_KEY is required for live news fetching")
@@ -72,9 +78,20 @@ def collect_news(settings: Settings, manual_path: str | None = None) -> tuple[li
         try:
             live_news = _fetch_live_news(settings)
             if live_news:
+                try:
+                    _save_news_file(settings.latest_news_cache_file, live_news)
+                except OSError:
+                    pass
                 return live_news, "live"
         except CollectorError:
             # Intentional fallback to maintain local run reliability.
+            pass
+
+        try:
+            latest_cached_news = _load_news_file(settings.latest_news_cache_file)
+            if latest_cached_news:
+                return latest_cached_news, "latest_available_cache"
+        except CollectorError:
             pass
 
     return _load_news_file(settings.mock_news_file), "mock"

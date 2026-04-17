@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     mock_news_file: str = "./data/mock/news_latest.json"
     mock_market_file: str = "./data/mock/market_latest.json"
+    latest_news_cache_file: str = "./data/cache/news_latest_available.json"
+    latest_market_cache_file: str = "./data/cache/market_latest_available.json"
 
     forecast_horizon: str = "5 trading days"
     market_universe: list[str] = Field(
@@ -53,6 +55,9 @@ class Settings(BaseSettings):
     enforce_input_freshness: bool = True
     max_news_age_hours: int = 72
     max_market_age_minutes: int = 60
+    allow_latest_available_fallback: bool = True
+    latest_available_max_news_age_hours: int = 168
+    latest_available_max_market_age_minutes: int = 10080
 
     fmp_api_key: str | None = None
     fmp_base_url: str = "https://financialmodelingprep.com/stable"
@@ -72,6 +77,7 @@ class Settings(BaseSettings):
     def ensure_directories(self) -> None:
         """Create required local directories if they do not exist."""
         Path("./data").mkdir(parents=True, exist_ok=True)
+        Path("./data/cache").mkdir(parents=True, exist_ok=True)
         Path(self.artifacts_dir).mkdir(parents=True, exist_ok=True)
 
 
