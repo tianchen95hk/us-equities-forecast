@@ -127,6 +127,23 @@ Endpoints:
 - `POST /run`
 - `GET /forecast/latest`
 
+## OpenClaw Quick Deploy
+
+Clone/pull + venv + dependencies + run in one script:
+
+```bash
+bash scripts/openclaw_install_and_run.sh
+```
+
+Common overrides:
+
+```bash
+REPO_DIR=$HOME/us-equities-forecast \
+PYTHON_BIN=python3.11 \
+RUN_ARGS="--live --output-style simple --output-lang zh" \
+bash scripts/openclaw_install_and_run.sh
+```
+
 ## Artifacts and Storage
 
 Each run writes separated artifacts:
