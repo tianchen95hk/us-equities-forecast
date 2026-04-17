@@ -1,0 +1,37 @@
+[
+  {
+    "source": "Reuters",
+    "headline": "Fed officials signal policy remains data dependent as inflation cools unevenly",
+    "summary": "Officials emphasized caution on rate cuts while noting gradual disinflation progress.",
+    "url": "https://example.com/reuters-fed-policy",
+    "published_at": "2026-04-17T01:20:00Z"
+  },
+  {
+    "source": "Bloomberg",
+    "headline": "US Treasury yields edge higher after stronger-than-expected labor update",
+    "summary": "The front-end and long-end yields both moved up modestly on growth resilience.",
+    "url": "https://example.com/bloomberg-yields",
+    "published_at": "2026-04-17T02:10:00Z"
+  },
+  {
+    "source": "WSJ",
+    "headline": "Oil steadies as traders watch shipping risk and OPEC supply discipline",
+    "summary": "Crude prices were range-bound with attention on geopolitical shipping lanes.",
+    "url": "https://example.com/wsj-oil",
+    "published_at": "2026-04-17T03:45:00Z"
+  },
+  {
+    "source": "CNBC",
+    "headline": "Mega-cap earnings guidance mixed as AI demand stays strong",
+    "summary": "Revenue trends remain solid in select names, but margin outlook is mixed.",
+    "url": "https://example.com/cnbc-earnings",
+    "published_at": "2026-04-17T04:30:00Z"
+  },
+  {
+    "source": "Financial Times",
+    "headline": "Dollar index firms as global growth concerns linger",
+    "summary": "Risk-sensitive currencies softened against the dollar overnight.",
+    "url": "https://example.com/ft-dxy",
+    "published_at": "2026-04-17T05:05:00Z"
+  }
+]

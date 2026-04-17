@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local env/secrets
+.env
+
+# OS
+.DS_Store
+
+# Runtime artifacts
+artifacts/
+data/forecast.db
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
