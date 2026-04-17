@@ -19,7 +19,14 @@ from app.pipeline.publish_forecast import select_publishable_forecast
 from app.pipeline.review_forecast import run_anti_hindsight_review
 from app.rules.schema_check import build_rule_report, validate_forecast_rules
 from app.rules.validators import repair_forecast_payload
-from app.schemas import AntiHindsightStatus, FinalForecast, InputFreshnessReport, RuleCheckReport
+from app.schemas import (
+    AntiHindsightStatus,
+    FinalForecast,
+    InputFreshnessReport,
+    NormalizedInputs,
+    RuleCheckReport,
+    StateMappingResult,
+)
 from app.storage.db import Storage
 from app.utils.prompt_loader import PromptLoader
 
@@ -42,6 +49,9 @@ class PipelineResult:
     latest_market_at: str | None = None
     run_started_at: str | None = None
     run_completed_at: str | None = None
+    market_snapshot: dict[str, dict[str, Any]] = field(default_factory=dict)
+    news_snapshot: list[dict[str, str]] = field(default_factory=list)
+    reasoning_summary: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -98,6 +108,84 @@ def _can_use_latest_available_fallback(
     return (len(reasons) == 0), reasons
 
 
+def _build_market_snapshot(
+    normalized_inputs: NormalizedInputs,
+    market_universe: list[str],
+) -> dict[str, dict[str, Any]]:
+    indicator_map = {item.symbol: item for item in normalized_inputs.indicators}
+    snapshot: dict[str, dict[str, Any]] = {}
+    for symbol in market_universe:
+        indicator = indicator_map.get(symbol)
+        if indicator is None:
+            continue
+        snapshot[symbol] = {
+            "name": indicator.name,
+            "value": round(float(indicator.value), 4),
+            "change_pct": (
+                None if indicator.change_pct is None else round(float(indicator.change_pct), 4)
+            ),
+            "as_of": indicator.as_of.isoformat(),
+        }
+    return snapshot
+
+
+def _build_news_snapshot(normalized_inputs: NormalizedInputs, top_k: int = 5) -> list[dict[str, str]]:
+    ranked_news = sorted(normalized_inputs.news, key=lambda item: item.published_at, reverse=True)[:top_k]
+    return [
+        {
+            "source": item.source,
+            "headline": item.headline,
+            "published_at": item.published_at.isoformat(),
+        }
+        for item in ranked_news
+    ]
+
+
+def _event_direction_counts(structured_events_payload: dict[str, Any]) -> dict[str, int]:
+    counts = {"up": 0, "down": 0, "neutral": 0}
+    events = structured_events_payload.get("events", [])
+    if not isinstance(events, list):
+        return counts
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        impact_bias = str(event.get("impact_bias", "neutral")).lower()
+        if impact_bias in counts:
+            counts[impact_bias] += 1
+    return counts
+
+
+def _append_state_reasoning_summary(
+    reasoning_summary: list[str],
+    state_mapping: StateMappingResult,
+    structured_events_payload: dict[str, Any],
+    confidence_breakdown_payload: dict[str, Any],
+) -> None:
+    reasoning_summary.append(f"状态映射: {state_mapping.regime_label}")
+    if state_mapping.scenarios:
+        top = max(state_mapping.scenarios, key=lambda item: float(item.probability))
+        reasoning_summary.append(
+            f"主情景: {top.name} ({top.probability * 100:.0f}%), 方向={top.directional_implication.value}"
+        )
+
+    counts = _event_direction_counts(structured_events_payload)
+    reasoning_summary.append(
+        f"事件方向统计: 上行={counts['up']} 下行={counts['down']} 中性={counts['neutral']}"
+    )
+
+    components = confidence_breakdown_payload.get("components", {})
+    penalties = confidence_breakdown_payload.get("penalties", {})
+    reasoning_summary.append(
+        "置信度拆解: "
+        f"场景一致性={components.get('scenario_alignment')} "
+        f"事件一致性={components.get('event_consensus')} "
+        f"跨资产确认={components.get('cross_asset_confirmation')} "
+        f"证据平衡={components.get('evidence_balance')} "
+        f"新鲜度惩罚={penalties.get('freshness_penalty')} "
+        f"风险惩罚={penalties.get('risk_penalty')}"
+    )
+
+
 def run_pipeline(
     settings: Settings,
     news_file: str | None = None,
@@ -142,6 +230,9 @@ def run_pipeline(
     latest_news_at: str | None = None
     latest_market_at: str | None = None
     latest_available_fallback_applied = False
+    market_snapshot: dict[str, dict[str, Any]] = {}
+    news_snapshot: list[dict[str, str]] = []
+    reasoning_summary: list[str] = []
 
     try:
         raw_news_items, news_source = deps.news_collector(settings, news_file)
@@ -184,6 +275,11 @@ def run_pipeline(
         latest_market_item = max((item.as_of for item in normalized_inputs.indicators), default=None)
         latest_news_at = latest_news_item.isoformat() if latest_news_item else None
         latest_market_at = latest_market_item.isoformat() if latest_market_item else None
+        market_snapshot = _build_market_snapshot(normalized_inputs, universe)
+        news_snapshot = _build_news_snapshot(normalized_inputs)
+        reasoning_summary.append(
+            f"输入概览: 新闻{len(normalized_inputs.news)}条, 市场指标{len(normalized_inputs.indicators)}个"
+        )
 
         freshness_report = build_input_freshness_report(
             normalized_inputs=normalized_inputs,
@@ -206,6 +302,9 @@ def run_pipeline(
                 )
                 if fallback_allowed:
                     latest_available_fallback_applied = True
+                    reasoning_summary.append(
+                        "输入时效超阈值，启用 latest-available fallback 继续推理"
+                    )
                     artifact_paths["input_latest_available_fallback"] = str(
                         storage.save_artifact(
                             run_id,
@@ -257,6 +356,9 @@ def run_pipeline(
                         latest_market_at=latest_market_at,
                         run_started_at=run_started_at_dt.isoformat(),
                         run_completed_at=datetime.now(timezone.utc).isoformat(),
+                        market_snapshot=market_snapshot,
+                        news_snapshot=news_snapshot,
+                        reasoning_summary=reasoning_summary,
                     )
             else:
                 rejection_reasons = [freshness_report.summary]
@@ -297,6 +399,9 @@ def run_pipeline(
                     latest_market_at=latest_market_at,
                     run_started_at=run_started_at_dt.isoformat(),
                     run_completed_at=datetime.now(timezone.utc).isoformat(),
+                    market_snapshot=market_snapshot,
+                    news_snapshot=news_snapshot,
+                    reasoning_summary=reasoning_summary,
                 )
 
         event_extraction_prompt = prompt_loader.load("event_extraction.txt")
@@ -398,6 +503,12 @@ def run_pipeline(
             latest_available_fallback_applied=latest_available_fallback_applied,
         )
         repaired_payload["confidence"] = confidence_result.confidence
+        _append_state_reasoning_summary(
+            reasoning_summary=reasoning_summary,
+            state_mapping=state_mapping,
+            structured_events_payload=structured_events.model_dump(mode="json"),
+            confidence_breakdown_payload=confidence_result.breakdown.model_dump(mode="json"),
+        )
         artifact_paths["confidence_breakdown"] = str(
             storage.save_artifact(
                 run_id,
@@ -423,9 +534,11 @@ def run_pipeline(
         if review_result.anti_hindsight_status != AntiHindsightStatus.PASS:
             rejection_reasons.append("ANTI_HINDSIGHT_FAIL: review status is FAIL")
             rejection_reasons.extend(review_result.issues)
+            reasoning_summary.append("反后验审查未通过，进入发布拒绝流程")
 
         if post_repair_rule_report.has_blocking_issues:
             rejection_reasons.extend(_rule_issues_to_reasons(post_repair_rule_report))
+            reasoning_summary.append("规则引擎在修复后仍发现阻断项，发布拒绝")
 
         if rejection_reasons:
             artifact_paths["review_rejected"] = str(
@@ -459,9 +572,13 @@ def run_pipeline(
                 latest_market_at=latest_market_at,
                 run_started_at=run_started_at_dt.isoformat(),
                 run_completed_at=datetime.now(timezone.utc).isoformat(),
+                market_snapshot=market_snapshot,
+                news_snapshot=news_snapshot,
+                reasoning_summary=reasoning_summary,
             )
 
         validate_forecast_rules(final_forecast)
+        reasoning_summary.append("审查与规则门禁全部通过，发布最终预测")
         artifact_paths["final_forecast"] = str(
             storage.save_artifact(
                 run_id,
@@ -485,6 +602,9 @@ def run_pipeline(
             latest_market_at=latest_market_at,
             run_started_at=run_started_at_dt.isoformat(),
             run_completed_at=datetime.now(timezone.utc).isoformat(),
+            market_snapshot=market_snapshot,
+            news_snapshot=news_snapshot,
+            reasoning_summary=reasoning_summary,
         )
 
     except Exception as exc:

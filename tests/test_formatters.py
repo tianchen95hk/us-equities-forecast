@@ -39,6 +39,22 @@ class FormatterTests(unittest.TestCase):
             latest_market_at="2026-04-17T09:55:00+00:00",
             run_started_at="2026-04-17T09:59:00+00:00",
             run_completed_at="2026-04-17T10:07:00+00:00",
+            market_snapshot={
+                "SPY": {
+                    "name": "SPDR S&P 500 ETF Trust",
+                    "value": 510.1,
+                    "change_pct": 0.4,
+                    "as_of": "2026-04-17T10:00:00+00:00",
+                }
+            },
+            news_snapshot=[
+                {
+                    "source": "stub-news",
+                    "headline": "Macro signal mixed",
+                    "published_at": "2026-04-17T09:40:00+00:00",
+                }
+            ],
+            reasoning_summary=["状态映射: stable regime", "主情景: Base(60%), 方向=neutral"],
             artifact_paths={
                 "final_forecast": "/tmp/final.json",
                 "market_raw": "/tmp/market.json",
@@ -52,6 +68,9 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(payload["反后验审查"], "通过")
         self.assertEqual(payload["置信度"], "61.0%")
         self.assertEqual(len(payload["核心驱动"]), 3)
+        self.assertIn("市场信息", payload)
+        self.assertIn("思维总结", payload)
+        self.assertIn("最新新闻", payload)
 
     def test_full_output_contains_full_forecast(self) -> None:
         payload = format_cli_output(self._sample_result(), language="zh", style="full")
@@ -66,6 +85,10 @@ class FormatterTests(unittest.TestCase):
         self.assertIn("结论", payload)
         self.assertIn("核心依据", payload)
         self.assertIn("条件结构", payload)
+        self.assertIn("市场信息", payload)
+        self.assertIn("最新新闻", payload)
+        self.assertIn("思维总结", payload)
+        self.assertIn("判断摘要", payload)
         self.assertIn("文件路径", payload)
 
     def test_simple_zh_output_for_rejected_publish(self) -> None:

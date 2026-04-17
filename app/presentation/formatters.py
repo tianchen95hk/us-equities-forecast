@@ -27,6 +27,9 @@ def format_cli_output(
             "latest_market_at": result.latest_market_at,
             "run_started_at": result.run_started_at,
             "run_completed_at": result.run_completed_at,
+            "market_snapshot": result.market_snapshot,
+            "news_snapshot": result.news_snapshot,
+            "reasoning_summary": result.reasoning_summary,
         }
         if result.final_forecast is not None:
             payload["final_forecast"] = result.final_forecast.model_dump(mode="json")
@@ -69,6 +72,10 @@ def _to_telegram_zh(result: PipelineResult) -> dict[str, Any]:
             },
             "发布状态": "已拒绝",
             "拒绝原因": result.rejection_reasons,
+            "市场信息": _market_snapshot_zh(result),
+            "最新新闻": _news_snapshot_zh(result),
+            "思维总结": _thinking_summary_zh(result),
+            "判断摘要": result.reasoning_summary,
             "文件路径": result.artifact_paths,
         }
 
@@ -102,6 +109,10 @@ def _to_telegram_zh(result: PipelineResult) -> dict[str, Any]:
             "失效条件": forecast.invalidation_conditions,
             "重点监控": forecast.monitoring_list,
         },
+        "市场信息": _market_snapshot_zh(result),
+        "最新新闻": _news_snapshot_zh(result),
+        "思维总结": _thinking_summary_zh(result),
+        "判断摘要": result.reasoning_summary,
         "文件路径": {
             "最终结果": result.artifact_paths.get("final_forecast"),
             "反后验审查": result.artifact_paths.get("anti_hindsight_review"),
@@ -125,6 +136,10 @@ def _to_telegram_en(result: PipelineResult) -> dict[str, Any]:
             },
             "publish_status": "rejected",
             "rejection_reasons": result.rejection_reasons,
+            "market_snapshot": _market_snapshot_en(result),
+            "news_snapshot": _news_snapshot_en(result),
+            "thinking_summary": _thinking_summary_en(result),
+            "reasoning_summary": result.reasoning_summary,
             "artifact_paths": result.artifact_paths,
         }
 
@@ -158,6 +173,10 @@ def _to_telegram_en(result: PipelineResult) -> dict[str, Any]:
             "invalidation_conditions": forecast.invalidation_conditions,
             "monitoring_list": forecast.monitoring_list,
         },
+        "market_snapshot": _market_snapshot_en(result),
+        "news_snapshot": _news_snapshot_en(result),
+        "thinking_summary": _thinking_summary_en(result),
+        "reasoning_summary": result.reasoning_summary,
         "artifact_paths": {
             "final_forecast": result.artifact_paths.get("final_forecast"),
             "anti_hindsight_review": result.artifact_paths.get("anti_hindsight_review"),
@@ -176,6 +195,10 @@ def _to_simple_zh(result: PipelineResult) -> dict[str, Any]:
             "运行ID": result.run_id,
             "发布状态": "已拒绝",
             "拒绝原因": result.rejection_reasons,
+            "市场信息": _market_snapshot_zh(result),
+            "最新新闻": _news_snapshot_zh(result),
+            "思维总结": _thinking_summary_zh(result),
+            "判断摘要": result.reasoning_summary,
             "文件路径": {
                 "拒绝详情": reject_detail_path,
                 "输入时效检查": result.artifact_paths.get("input_freshness_report"),
@@ -199,6 +222,10 @@ def _to_simple_zh(result: PipelineResult) -> dict[str, Any]:
         "失效条件": forecast.invalidation_conditions[:3],
         "重点监控": forecast.monitoring_list[:5],
         "结论摘要": forecast.final_thesis,
+        "市场信息": _market_snapshot_zh(result),
+        "最新新闻": _news_snapshot_zh(result),
+        "思维总结": _thinking_summary_zh(result),
+        "判断摘要": result.reasoning_summary,
         "文件路径": {
             "最终结果": result.artifact_paths.get("final_forecast"),
             "市场原始数据": result.artifact_paths.get("market_raw"),
@@ -217,6 +244,10 @@ def _to_simple_en(result: PipelineResult) -> dict[str, Any]:
             "run_id": result.run_id,
             "publish_status": "rejected",
             "rejection_reasons": result.rejection_reasons,
+            "market_snapshot": _market_snapshot_en(result),
+            "news_snapshot": _news_snapshot_en(result),
+            "thinking_summary": _thinking_summary_en(result),
+            "reasoning_summary": result.reasoning_summary,
             "artifact_paths": {
                 "rejected_detail": reject_detail_path,
                 "input_freshness_report": result.artifact_paths.get("input_freshness_report"),
@@ -240,6 +271,10 @@ def _to_simple_en(result: PipelineResult) -> dict[str, Any]:
         "invalidation_conditions": forecast.invalidation_conditions[:3],
         "monitoring_list": forecast.monitoring_list[:5],
         "thesis": forecast.final_thesis,
+        "market_snapshot": _market_snapshot_en(result),
+        "news_snapshot": _news_snapshot_en(result),
+        "thinking_summary": _thinking_summary_en(result),
+        "reasoning_summary": result.reasoning_summary,
         "artifact_paths": {
             "final_forecast": result.artifact_paths.get("final_forecast"),
             "market_raw": result.artifact_paths.get("market_raw"),
@@ -268,3 +303,99 @@ def _status_zh(value: str) -> str:
 
 def _percent(value: float) -> str:
     return f"{value * 100:.1f}%"
+
+
+def _market_snapshot_zh(result: PipelineResult) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for symbol, payload in result.market_snapshot.items():
+        rows.append(
+            {
+                "标的": symbol,
+                "名称": payload.get("name"),
+                "最新值": payload.get("value"),
+                "日变动%": payload.get("change_pct"),
+                "时间": _fmt_dt(payload.get("as_of")),
+            }
+        )
+    return rows
+
+
+def _market_snapshot_en(result: PipelineResult) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for symbol, payload in result.market_snapshot.items():
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": payload.get("name"),
+                "value": payload.get("value"),
+                "change_pct": payload.get("change_pct"),
+                "as_of": _fmt_dt(payload.get("as_of"), "UTC"),
+            }
+        )
+    return rows
+
+
+def _news_snapshot_zh(result: PipelineResult) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in result.news_snapshot:
+        rows.append(
+            {
+                "来源": item.get("source"),
+                "标题": item.get("headline"),
+                "时间": _fmt_dt(item.get("published_at")),
+            }
+        )
+    return rows
+
+
+def _news_snapshot_en(result: PipelineResult) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in result.news_snapshot:
+        rows.append(
+            {
+                "source": item.get("source"),
+                "headline": item.get("headline"),
+                "published_at": _fmt_dt(item.get("published_at"), "UTC"),
+            }
+        )
+    return rows
+
+
+def _thinking_summary_zh(result: PipelineResult) -> list[str]:
+    if result.final_forecast is None:
+        reasons = "；".join(result.rejection_reasons[:2]) if result.rejection_reasons else "规则门禁未通过"
+        return [f"本次未发布：{reasons}"] + result.reasoning_summary[:3]
+
+    forecast = result.final_forecast
+    drivers = "；".join(forecast.dominant_drivers[:2]) if forecast.dominant_drivers else "暂无主驱动"
+    support = forecast.supportive_evidence[0] if forecast.supportive_evidence else "暂无支持证据"
+    oppose = forecast.opposing_evidence[0] if forecast.opposing_evidence else "暂无反方证据"
+    invalidation = (
+        forecast.invalidation_conditions[0] if forecast.invalidation_conditions else "暂无失效条件"
+    )
+    return [
+        f"方向={_bias_zh(forecast.directional_bias.value)}，置信度={_percent(forecast.confidence)}。",
+        f"核心原因：{drivers}",
+        f"支持证据：{support}",
+        f"反方证据：{oppose}",
+        f"失效条件：{invalidation}",
+    ]
+
+
+def _thinking_summary_en(result: PipelineResult) -> list[str]:
+    if result.final_forecast is None:
+        reasons = "; ".join(result.rejection_reasons[:2]) if result.rejection_reasons else "rule gate failed"
+        return [f"Publish rejected: {reasons}"] + result.reasoning_summary[:3]
+
+    forecast = result.final_forecast
+    drivers = "; ".join(forecast.dominant_drivers[:2]) if forecast.dominant_drivers else "n/a"
+    support = forecast.supportive_evidence[0] if forecast.supportive_evidence else "n/a"
+    oppose = forecast.opposing_evidence[0] if forecast.opposing_evidence else "n/a"
+    invalidation = forecast.invalidation_conditions[0] if forecast.invalidation_conditions else "n/a"
+    return [
+        f"Bias={forecast.directional_bias.value}, confidence={_percent(forecast.confidence)}.",
+        f"Core reason: {drivers}",
+        f"Support: {support}",
+        f"Opposition: {oppose}",
+        f"Invalidation: {invalidation}",
+    ]

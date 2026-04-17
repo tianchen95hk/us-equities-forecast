@@ -83,6 +83,9 @@ def _pipeline_result_to_response(result: PipelineResult) -> dict[str, Any]:
         "latest_market_at": result.latest_market_at,
         "run_started_at": result.run_started_at,
         "run_completed_at": result.run_completed_at,
+        "market_snapshot": result.market_snapshot,
+        "news_snapshot": result.news_snapshot,
+        "reasoning_summary": result.reasoning_summary,
     }
     if result.final_forecast is not None:
         payload.update(
