@@ -33,6 +33,12 @@ class FormatterTests(unittest.TestCase):
             final_forecast=forecast,
             publish_status="approved",
             rejection_reasons=[],
+            collected_at="2026-04-17T10:00:00+00:00",
+            reviewed_at="2026-04-17T10:06:00+00:00",
+            latest_news_at="2026-04-17T09:40:00+00:00",
+            latest_market_at="2026-04-17T09:55:00+00:00",
+            run_started_at="2026-04-17T09:59:00+00:00",
+            run_completed_at="2026-04-17T10:07:00+00:00",
             artifact_paths={
                 "final_forecast": "/tmp/final.json",
                 "market_raw": "/tmp/market.json",
@@ -52,6 +58,15 @@ class FormatterTests(unittest.TestCase):
         self.assertIn("final_forecast", payload)
         self.assertIn("artifact_paths", payload)
         self.assertEqual(payload["publish_status"], "approved")
+        self.assertIn("collected_at", payload)
+
+    def test_telegram_zh_output_contains_expected_blocks(self) -> None:
+        payload = format_cli_output(self._sample_result(), language="zh", style="telegram")
+        self.assertIn("运行信息", payload)
+        self.assertIn("结论", payload)
+        self.assertIn("核心依据", payload)
+        self.assertIn("条件结构", payload)
+        self.assertIn("文件路径", payload)
 
     def test_simple_zh_output_for_rejected_publish(self) -> None:
         rejected_result = PipelineResult(
@@ -59,6 +74,8 @@ class FormatterTests(unittest.TestCase):
             final_forecast=None,
             publish_status="rejected",
             rejection_reasons=["ANTI_HINDSIGHT_FAIL: review status is FAIL"],
+            run_started_at="2026-04-17T09:59:00+00:00",
+            run_completed_at="2026-04-17T10:07:00+00:00",
             artifact_paths={
                 "review_rejected": "/tmp/review_rejected.json",
                 "anti_hindsight_review": "/tmp/review.json",

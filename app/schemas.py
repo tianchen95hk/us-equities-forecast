@@ -106,6 +106,34 @@ class InputFreshnessReport(BaseModel):
     summary: str
 
 
+class ConfidenceComponentScores(BaseModel):
+    """Component scores used by deterministic confidence model."""
+
+    scenario_alignment: float
+    event_consensus: float
+    cross_asset_confirmation: float
+    evidence_balance: float
+
+
+class ConfidencePenaltyScores(BaseModel):
+    """Penalty terms used by deterministic confidence model."""
+
+    freshness_penalty: float
+    risk_penalty: float
+
+
+class ConfidenceBreakdown(BaseModel):
+    """Auditable confidence formula output."""
+
+    formula: str
+    directional_bias: str
+    components: ConfidenceComponentScores
+    penalties: ConfidencePenaltyScores
+    raw_confidence: float
+    final_confidence: float
+    notes: list[str] = Field(default_factory=list)
+
+
 class StructuredEvent(BaseModel):
     """Event extracted from current observable data."""
 

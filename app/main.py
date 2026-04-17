@@ -77,6 +77,12 @@ def _pipeline_result_to_response(result: PipelineResult) -> dict[str, Any]:
         "publish_status": result.publish_status,
         "rejection_reasons": result.rejection_reasons,
         "artifact_paths": result.artifact_paths,
+        "collected_at": result.collected_at,
+        "reviewed_at": result.reviewed_at,
+        "latest_news_at": result.latest_news_at,
+        "latest_market_at": result.latest_market_at,
+        "run_started_at": result.run_started_at,
+        "run_completed_at": result.run_completed_at,
     }
     if result.final_forecast is not None:
         payload.update(
@@ -163,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--output-style",
-        choices=["simple", "full"],
+        choices=["simple", "telegram", "full"],
         default=None,
         help="CLI output style. Defaults to OUTPUT_STYLE from .env.",
     )

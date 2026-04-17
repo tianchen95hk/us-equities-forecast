@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 45.0
 
     output_language: Literal["zh", "en"] = "zh"
-    output_style: Literal["simple", "full"] = "simple"
+    output_style: Literal["simple", "telegram", "full"] = "simple"
 
     use_live_data: bool = False
     request_timeout_seconds: float = 15.0

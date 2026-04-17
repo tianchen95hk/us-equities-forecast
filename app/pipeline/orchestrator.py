@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -10,6 +11,7 @@ from app.collectors.news import collect_news
 from app.config import Settings
 from app.llm_client import BaseLLMClient, build_llm_client
 from app.pipeline.check_freshness import build_input_freshness_report
+from app.pipeline.confidence import compute_confidence
 from app.pipeline.extract_events import run_event_extraction
 from app.pipeline.map_states import run_state_and_forecast
 from app.pipeline.normalize import normalize_inputs
@@ -34,6 +36,12 @@ class PipelineResult:
     artifact_paths: dict[str, str]
     publish_status: Literal["approved", "rejected"]
     rejection_reasons: list[str] = field(default_factory=list)
+    collected_at: str | None = None
+    reviewed_at: str | None = None
+    latest_news_at: str | None = None
+    latest_market_at: str | None = None
+    run_started_at: str | None = None
+    run_completed_at: str | None = None
 
 
 @dataclass
@@ -126,8 +134,14 @@ def run_pipeline(
     )
     allow_latest_available_fallback = settings.allow_latest_available_fallback
 
+    run_started_at_dt = datetime.now(timezone.utc)
     run_id = storage.create_run(forecast_horizon=horizon, market_universe=universe)
     artifact_paths: dict[str, str] = {}
+    collected_at: str | None = None
+    reviewed_at: str | None = None
+    latest_news_at: str | None = None
+    latest_market_at: str | None = None
+    latest_available_fallback_applied = False
 
     try:
         raw_news_items, news_source = deps.news_collector(settings, news_file)
@@ -165,6 +179,11 @@ def run_pipeline(
                 payload=normalized_inputs.model_dump(mode="json"),
             )
         )
+        collected_at = normalized_inputs.collected_at.isoformat()
+        latest_news_item = max((item.published_at for item in normalized_inputs.news), default=None)
+        latest_market_item = max((item.as_of for item in normalized_inputs.indicators), default=None)
+        latest_news_at = latest_news_item.isoformat() if latest_news_item else None
+        latest_market_at = latest_market_item.isoformat() if latest_market_item else None
 
         freshness_report = build_input_freshness_report(
             normalized_inputs=normalized_inputs,
@@ -186,6 +205,7 @@ def run_pipeline(
                     settings=settings,
                 )
                 if fallback_allowed:
+                    latest_available_fallback_applied = True
                     artifact_paths["input_latest_available_fallback"] = str(
                         storage.save_artifact(
                             run_id,
@@ -231,6 +251,12 @@ def run_pipeline(
                         artifact_paths=artifact_paths,
                         publish_status="rejected",
                         rejection_reasons=rejection_reasons,
+                        collected_at=collected_at,
+                        reviewed_at=reviewed_at,
+                        latest_news_at=latest_news_at,
+                        latest_market_at=latest_market_at,
+                        run_started_at=run_started_at_dt.isoformat(),
+                        run_completed_at=datetime.now(timezone.utc).isoformat(),
                     )
             else:
                 rejection_reasons = [freshness_report.summary]
@@ -265,6 +291,12 @@ def run_pipeline(
                     artifact_paths=artifact_paths,
                     publish_status="rejected",
                     rejection_reasons=rejection_reasons,
+                    collected_at=collected_at,
+                    reviewed_at=reviewed_at,
+                    latest_news_at=latest_news_at,
+                    latest_market_at=latest_market_at,
+                    run_started_at=run_started_at_dt.isoformat(),
+                    run_completed_at=datetime.now(timezone.utc).isoformat(),
                 )
 
         event_extraction_prompt = prompt_loader.load("event_extraction.txt")
@@ -332,6 +364,7 @@ def run_pipeline(
             draft_rule_report=draft_rule_report,
             output_language=settings.output_language,
         )
+        reviewed_at = review_result.reviewed_at.isoformat()
         artifact_paths["anti_hindsight_review"] = str(
             storage.save_artifact(
                 run_id,
@@ -357,6 +390,23 @@ def run_pipeline(
             publish_candidate.model_dump(mode="json"),
             output_language=settings.output_language,
         )
+        confidence_result = compute_confidence(
+            state_mapping=state_mapping,
+            structured_events_payload=structured_events.model_dump(mode="json"),
+            forecast_payload=repaired_payload,
+            freshness_report=freshness_report,
+            latest_available_fallback_applied=latest_available_fallback_applied,
+        )
+        repaired_payload["confidence"] = confidence_result.confidence
+        artifact_paths["confidence_breakdown"] = str(
+            storage.save_artifact(
+                run_id,
+                stage="intermediate",
+                artifact_name="confidence_breakdown.json",
+                payload=confidence_result.breakdown.model_dump(mode="json"),
+            )
+        )
+
         post_repair_rule_report = build_rule_report(repaired_payload)
         artifact_paths["post_repair_rule_report"] = str(
             storage.save_artifact(
@@ -403,6 +453,12 @@ def run_pipeline(
                 artifact_paths=artifact_paths,
                 publish_status="rejected",
                 rejection_reasons=rejection_reasons,
+                collected_at=collected_at,
+                reviewed_at=reviewed_at,
+                latest_news_at=latest_news_at,
+                latest_market_at=latest_market_at,
+                run_started_at=run_started_at_dt.isoformat(),
+                run_completed_at=datetime.now(timezone.utc).isoformat(),
             )
 
         validate_forecast_rules(final_forecast)
@@ -423,6 +479,12 @@ def run_pipeline(
             artifact_paths=artifact_paths,
             publish_status="approved",
             rejection_reasons=[],
+            collected_at=collected_at,
+            reviewed_at=reviewed_at,
+            latest_news_at=latest_news_at,
+            latest_market_at=latest_market_at,
+            run_started_at=run_started_at_dt.isoformat(),
+            run_completed_at=datetime.now(timezone.utc).isoformat(),
         )
 
     except Exception as exc:

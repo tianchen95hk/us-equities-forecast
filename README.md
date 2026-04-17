@@ -89,6 +89,12 @@ python -m app.main run
 python -m app.main run --output-style full
 ```
 
+切换 Telegram 展示结构（包含运行时间、采集时间、审查时间）：
+
+```bash
+python -m app.main run --output-style telegram
+```
+
 切换英文简版：
 
 ```bash
@@ -179,6 +185,7 @@ Each run writes separated artifacts:
 - `artifacts/<run_id>/intermediate/forecast_draft.json`
 - `artifacts/<run_id>/intermediate/draft_rule_report.json`
 - `artifacts/<run_id>/intermediate/anti_hindsight_review.json`
+- `artifacts/<run_id>/intermediate/confidence_breakdown.json`
 - `artifacts/<run_id>/intermediate/post_review_rule_report.json`
 - `artifacts/<run_id>/intermediate/post_repair_rule_report.json`
 - approved: `artifacts/<run_id>/final/final_forecast.json`
@@ -218,6 +225,24 @@ Publish is allowed only when both conditions hold:
 
 - `anti_hindsight_status=PASS`
 - `post_repair_rule_report.has_blocking_issues=false`
+
+## Confidence Logic
+
+Final confidence is deterministic and recalculated locally from observable consistency:
+
+```text
+0.40
++ 0.22 * scenario_alignment
++ 0.20 * event_consensus
++ 0.23 * cross_asset_confirmation
++ 0.12 * evidence_balance
+- freshness_penalty
+- risk_penalty
+```
+
+The computed score is clamped to `[0.35, 0.90]`, rounded to 2 decimals, and written to:
+
+- `intermediate/confidence_breakdown.json`
 
 If either fails:
 
