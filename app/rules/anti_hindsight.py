@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from app.schemas import GovernanceIssue, IssueSeverity
 
-BANNED_PRICE_TARGET_PATTERNS: tuple[re.Pattern[str], ...] = (
+HARD_PRICE_TARGET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\btarget\s+price\b", re.IGNORECASE),
     re.compile(r"\bwill\s+reach\b", re.IGNORECASE),
-    re.compile(r"\bbreak\s+above\b", re.IGNORECASE),
-    re.compile(r"\bfall\s+to\b", re.IGNORECASE),
     re.compile(r"\bhit\s+\$?\d{3,6}(?:\.\d+)?\b", re.IGNORECASE),
     re.compile(r"\bprice\s+target\b", re.IGNORECASE),
     re.compile(r"\bupside\s+target\b", re.IGNORECASE),
@@ -19,10 +17,20 @@ BANNED_PRICE_TARGET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bprice\s+objective\b", re.IGNORECASE),
     re.compile(r"目标价"),
     re.compile(r"(?:将到|会到|将会到|到达)\s*\d+(?:\.\d+)?(?:\s*(?:点|美元|元))?"),
+)
+
+LEVEL_REFERENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bbreak\s+above\b", re.IGNORECASE),
+    re.compile(r"\bfall\s+to\b", re.IGNORECASE),
     re.compile(r"突破\s*\d+(?:\.\d+)?"),
     re.compile(r"跌破\s*\d+(?:\.\d+)?"),
     re.compile(r"触及\s*\d+(?:\.\d+)?\s*(?:点|美元|元)?"),
     re.compile(r"(?:突破|跌破)\s*(?:关键位|关键点位|前高|前低)"),
+)
+
+BANNED_PRICE_TARGET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    *HARD_PRICE_TARGET_PATTERNS,
+    *LEVEL_REFERENCE_PATTERNS,
 )
 
 BANNED_HINDSIGHT_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -51,6 +59,10 @@ SCANNED_FORECAST_FIELDS: tuple[str, ...] = (
 )
 
 VALID_REVIEW_STATUSES = {"PASS", "FAIL"}
+_CONDITIONAL_CONTEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:if|when|unless|should|in case)\b", re.IGNORECASE),
+    re.compile(r"(?:若|如果|一旦|当|除非|可能|触发|否则)"),
+)
 
 
 def flatten_text(value: Any) -> list[str]:
@@ -101,13 +113,18 @@ def _collect_for_patterns(
     texts_by_field: dict[str, list[str]],
     patterns: tuple[re.Pattern[str], ...],
     code_prefix: str,
+    severity_resolver: Callable[[str, str, re.Pattern[str]], IssueSeverity] | None = None,
 ) -> list[GovernanceIssue]:
     findings: list[GovernanceIssue] = []
     for field_name, texts in texts_by_field.items():
-        severity = _field_severity(field_name)
         for text in texts:
             for pattern in patterns:
                 if pattern.search(text):
+                    severity = (
+                        severity_resolver(field_name, text, pattern)
+                        if severity_resolver is not None
+                        else _field_severity(field_name)
+                    )
                     findings.append(
                         GovernanceIssue(
                             code=f"{code_prefix}_{_normalize_field_code(field_name)}",
@@ -117,6 +134,32 @@ def _collect_for_patterns(
                         )
                     )
     return findings
+
+
+def _has_conditional_context(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _CONDITIONAL_CONTEXT_PATTERNS)
+
+
+def _price_issue_severity(field_name: str, text: str, pattern: re.Pattern[str]) -> IssueSeverity:
+    """
+    Determine severity for price/level language.
+
+    Rules:
+    - Explicit target language in thesis/drivers remains hard-fail.
+    - Conditional level references in thesis/drivers are warnings (risk framing).
+    - Triggers/monitoring/invalidation remain warning-level by design.
+    """
+    if field_name in {"monitoring_list", "invalidation_conditions", "upside_triggers", "downside_triggers"}:
+        return IssueSeverity.SOFT_WARN
+
+    if field_name in {"final_thesis", "dominant_drivers"}:
+        if pattern in HARD_PRICE_TARGET_PATTERNS:
+            return IssueSeverity.HARD_FAIL
+        if pattern in LEVEL_REFERENCE_PATTERNS and _has_conditional_context(text):
+            return IssueSeverity.SOFT_WARN
+        return IssueSeverity.HARD_FAIL
+
+    return IssueSeverity.SOFT_WARN
 
 
 def _review_summary_findings(review_summary: str | None) -> list[GovernanceIssue]:
@@ -180,6 +223,7 @@ def find_banned_phrase_issues(
         texts_by_field=scoped_texts,
         patterns=BANNED_PRICE_TARGET_PATTERNS,
         code_prefix="PRICE_TARGET_IN",
+        severity_resolver=_price_issue_severity,
     )
     hindsight_findings = _collect_for_patterns(
         texts_by_field=scoped_texts,

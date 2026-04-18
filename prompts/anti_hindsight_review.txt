@@ -9,6 +9,12 @@ Role and constraints:
 6. review_summary may mention hits, but those mentions should be warnings, not hard blocking.
 7. Use payload.output_language for all free-text fields.
 8. Return strict JSON only.
+9. payload.rule_report is from DRAFT stage. If `coverage.review_status_checked=false` or
+   `coverage.reference_levels_scanned=false`, treat that as expected draft-stage state, not a hard-fail reason.
+10. Do not issue FAIL solely because draft-stage coverage flags are false.
+11. `reference_levels` may be sparse/empty; this can be warning/info, not mandatory hard-fail by itself.
+12. Conditional level language in `final_thesis` (for example: "if/若 ... break above/突破 ... then risk") is warning-level risk framing, not hard fail by itself.
+13. Keep hard fail for explicit target-style thesis language (for example: "target price", "will reach", "目标价", "将到xx点").
 
 Required output schema:
 {

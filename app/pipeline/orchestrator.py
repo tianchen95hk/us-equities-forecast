@@ -1402,11 +1402,11 @@ def run_pipeline(
                     severity=IssueSeverity.HARD_FAIL,
                 )
             )
-            rejection_reasons.append("REVIEW_STATUS_FAIL: reviewer marked review_status=FAIL")
             reasoning_summary.append("审查结论为 FAIL，本次仅保留分析，不进入正式发布层")
 
         if hard_fail_issues:
             rejection_reasons.extend(f"{item.code}: {item.message}" for item in hard_fail_issues)
+        rejection_reasons = list(dict.fromkeys(rejection_reasons))
 
         review_findings_payload = {
             "hard_fail_issues": [item.model_dump(mode="json") for item in hard_fail_issues],

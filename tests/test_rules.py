@@ -58,6 +58,15 @@ class ForecastRuleTests(unittest.TestCase):
         with self.assertRaises(RuleViolationError):
             validate_forecast_rules(payload, require_review_status=True)
 
+    def test_conditional_level_phrase_in_thesis_is_warning_only(self) -> None:
+        forecast = self._valid_forecast()
+        payload = forecast.model_dump(mode="json")
+        payload["final_thesis"] = "若10年期收益率突破100，可能触发科技股估值回调。"
+
+        report = build_rule_report(payload, require_review_status=True)
+        self.assertFalse(report.has_hard_fail)
+        self.assertTrue(any(item.code == "PRICE_TARGET_IN_FINAL_THESIS" for item in report.soft_warnings))
+
     def test_unparseable_horizon_is_rejected(self) -> None:
         forecast = self._valid_forecast()
         payload = forecast.model_dump(mode="json")
