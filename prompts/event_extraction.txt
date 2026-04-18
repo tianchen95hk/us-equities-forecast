@@ -18,7 +18,9 @@ Required JSON schema:
       "impact_bias": "up|down|neutral",
       "impact_pathway": "string",
       "confidence": 0.0,
-      "evidence_refs": ["string"]
+      "evidence_refs": ["string"],
+      "source_type": "string|null",
+      "source_reliability": "string|null"
     }
   ]
 }

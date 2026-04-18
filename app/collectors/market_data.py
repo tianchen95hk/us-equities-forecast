@@ -21,6 +21,8 @@ YAHOO_SYMBOLS: dict[str, str] = {
     "US10Y": "^TNX",
     "DXY": "DX-Y.NYB",
     "OIL": "CL=F",
+    "BTC": "BTC-USD",
+    "USDJPY": "JPY=X",
 }
 
 # Candidate FMP symbols per canonical instrument.
@@ -33,6 +35,8 @@ FMP_SYMBOL_CANDIDATES: dict[str, list[str]] = {
     "US10Y": ["^TNX", "TNX", "IEF"],
     "DXY": ["DXY", "DX-Y.NYB", "UUP"],
     "OIL": ["CLUSD", "USO", "CL=F"],
+    "BTC": ["BTCUSD", "BTC-USD", "BTC"],
+    "USDJPY": ["USDJPY", "JPYUSD", "USDUJPY", "JPY=X"],
 }
 
 INDICATOR_NAMES: dict[str, str] = {
@@ -43,6 +47,8 @@ INDICATOR_NAMES: dict[str, str] = {
     "US10Y": "US 10Y Treasury Yield Proxy",
     "DXY": "US Dollar Index Proxy",
     "OIL": "WTI Crude Oil Proxy",
+    "BTC": "Bitcoin USD Spot Proxy",
+    "USDJPY": "USD/JPY FX Rate",
 }
 
 INDICATOR_UNITS: dict[str, str] = {
@@ -53,6 +59,8 @@ INDICATOR_UNITS: dict[str, str] = {
     "US10Y": "proxy",
     "DXY": "proxy",
     "OIL": "proxy",
+    "BTC": "usd",
+    "USDJPY": "fx",
 }
 
 

@@ -1,6 +1,6 @@
 # US Equities Forward-Looking Forecast System
 
-Minimal but production-minded single-repo Python app for directional forecasting on US equities context (`SPY`, `QQQ`, `IWM`, `VIX`, `US10Y`, `DXY`, `OIL`).
+Minimal but production-minded single-repo Python app for directional forecasting on US equities context (`SPY`, `QQQ`, `IWM`, `VIX`, `US10Y`, `DXY`, `OIL`) with two hard auxiliary signals (`BTC`, `USDJPY`).
 
 The system is explicitly designed to avoid hindsight bias and price-target logic.
 
@@ -9,6 +9,8 @@ The system is explicitly designed to avoid hindsight bias and price-target logic
 - Collectors only collect raw inputs (manual/live/mock) and contain no forecasting logic.
 - Pipeline stages each have one responsibility:
   - normalize inputs
+  - collect earnings revision proxy (FMP)
+  - compute deterministic five-factor snapshot and dominant factor
   - extract events
   - map states + generate draft forecast (single combined stage)
   - review for anti-hindsight (consumes rule report)
@@ -24,6 +26,9 @@ The system is explicitly designed to avoid hindsight bias and price-target logic
 - Latest-available fallback (default enabled):
   - if freshness gate is exceeded but data exists, pipeline can continue with latest available inputs
   - fallback still enforces a hard cap (`LATEST_AVAILABLE_MAX_*`) to prevent very old data.
+- Deterministic five-factor engine:
+  - `earnings_revision`, `volatility`, `rates`, `dollar`, `energy_geopolitics`
+  - dominant factor uses `abs(weight*score)`, supports tie output.
 
 ### Strict 3-Call LLM Chain
 
@@ -43,7 +48,9 @@ No extra LLM repair call is used.
 - `app/utils/prompt_loader.py`
 - `app/collectors/news.py`
 - `app/collectors/market_data.py`
+- `app/collectors/earnings_revision.py`
 - `app/pipeline/normalize.py`
+- `app/pipeline/factors.py`
 - `app/pipeline/extract_events.py`
 - `app/pipeline/map_states.py`
 - `app/pipeline/generate_forecast.py` (legacy compatibility helper; not used in strict 3-call orchestrator)
@@ -80,7 +87,7 @@ cp .env.example .env
 python -m app.main run
 ```
 
-默认 CLI 输出为**中文简版**（可读摘要）。
+默认 CLI 输出为**中文可读文本面板**（不是 JSON）。
 并且当 `OUTPUT_LANGUAGE=zh` 时，系统会要求模型将最终预测正文也输出为中文。
 
 切换完整输出：
@@ -93,6 +100,13 @@ python -m app.main run --output-style full
 
 ```bash
 python -m app.main run --output-style telegram
+```
+
+切换渲染格式（默认 `text`，脚本场景可用 `json`）：
+
+```bash
+python -m app.main run --output-format text
+python -m app.main run --output-format json
 ```
 
 切换英文简版：
@@ -212,6 +226,8 @@ Each run writes separated artifacts:
 - `artifacts/<run_id>/raw/market_indicators_raw.json`
 - `artifacts/<run_id>/intermediate/normalized_inputs.json`
 - `artifacts/<run_id>/intermediate/input_freshness_report.json`
+- `artifacts/<run_id>/intermediate/earnings_revision_proxy.json`
+- `artifacts/<run_id>/intermediate/factor_state_snapshot.json`
 - optional fallback marker: `artifacts/<run_id>/intermediate/input_latest_available_fallback.json`
 - `artifacts/<run_id>/intermediate/structured_events.json`
 - `artifacts/<run_id>/intermediate/state_mapping.json`
@@ -225,6 +241,12 @@ Each run writes separated artifacts:
 - rejected: `artifacts/<run_id>/final/review_rejected.json`
 - rejected by stale inputs: `artifacts/<run_id>/final/input_rejected.json`
 - both approved/rejected: `artifacts/<run_id>/final/analysis_trace.json`
+
+`analysis_trace.json` now includes factor visibility fields:
+- `factor_snapshot`
+- `dominant_factor`
+- `dominant_factor_explainer`
+- `earnings_revision_proxy_summary`
 
 SQLite tables:
 - `runs`
@@ -334,6 +356,8 @@ Current proxy fallback examples:
 - `US10Y` may resolve to `IEF`
 - `DXY` may resolve to `UUP`
 - `OIL` may resolve to `USO`
+- `BTC` may resolve to `BTCUSD` (or Yahoo `BTC-USD`)
+- `USDJPY` may resolve to `USDJPY` (or Yahoo `JPY=X`)
 
 ## News API recommendation
 

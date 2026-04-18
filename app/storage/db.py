@@ -8,13 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import create_engine, desc, select
+from sqlalchemy import create_engine, desc, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.config import Settings
-from app.exceptions import RuleViolationError
-from app.schemas import AntiHindsightStatus, FinalForecast
+from app.schemas import FinalForecast
 from app.storage.models import ArtifactRecord, Base, ForecastRecord, RunRecord
 
 
@@ -34,10 +33,34 @@ class Storage:
     def init_db(self) -> None:
         """Create database tables if they do not exist."""
         Base.metadata.create_all(self._engine)
+        if self._settings.database_url.startswith("sqlite"):
+            self._ensure_sqlite_forecast_columns()
 
     def close(self) -> None:
         """Release engine resources and underlying DB connections."""
         self._engine.dispose()
+
+    def _ensure_sqlite_forecast_columns(self) -> None:
+        """Best-effort additive migration for newly introduced forecast fields."""
+        expected_columns: dict[str, str] = {
+            "review_status": "TEXT NOT NULL DEFAULT 'FAIL'",
+            "run_status": "TEXT NOT NULL DEFAULT 'review_fail'",
+            "is_publishable": "INTEGER NOT NULL DEFAULT 0",
+            "decision_summary": "TEXT",
+            "hard_fail_count": "INTEGER NOT NULL DEFAULT 0",
+            "soft_warn_count": "INTEGER NOT NULL DEFAULT 0",
+            "reference_levels_json": "TEXT",
+            "review_findings_json": "TEXT",
+            "review_summary": "TEXT",
+        }
+
+        with self._engine.begin() as conn:
+            table_info = conn.execute(text("PRAGMA table_info('forecasts')")).fetchall()
+            existing = {str(row[1]) for row in table_info}
+            for column_name, ddl in expected_columns.items():
+                if column_name in existing:
+                    continue
+                conn.execute(text(f"ALTER TABLE forecasts ADD COLUMN {column_name} {ddl}"))
 
     def create_run(self, forecast_horizon: str, market_universe: list[str]) -> str:
         """Create run record with RUNNING status and return run id."""
@@ -89,20 +112,37 @@ class Storage:
 
         return artifact_path.resolve()
 
-    def save_forecast(self, run_id: str, forecast: FinalForecast) -> None:
-        """Persist reviewed final forecast payload in structured storage."""
-        if forecast.anti_hindsight_status != AntiHindsightStatus.PASS:
-            raise RuleViolationError(
-                "Refusing to persist forecast because anti_hindsight_status is not PASS"
-            )
-
+    def save_forecast(
+        self,
+        run_id: str,
+        forecast: FinalForecast,
+        *,
+        run_status: str,
+        is_publishable: bool,
+        decision_summary: str,
+        hard_fail_count: int,
+        soft_warn_count: int,
+        reference_levels: dict[str, object],
+        review_findings: dict[str, object],
+        review_summary: str,
+    ) -> None:
+        """Persist reviewed forecast payload in structured storage."""
         with self._session_factory() as session:
             session.add(
                 ForecastRecord(
                     run_id=run_id,
                     directional_bias=forecast.directional_bias.value,
                     confidence=float(forecast.confidence),
-                    anti_hindsight_status=forecast.anti_hindsight_status.value,
+                    anti_hindsight_status=forecast.review_status.value,
+                    review_status=forecast.review_status.value,
+                    run_status=run_status,
+                    is_publishable=bool(is_publishable),
+                    decision_summary=decision_summary,
+                    hard_fail_count=int(hard_fail_count),
+                    soft_warn_count=int(soft_warn_count),
+                    reference_levels_json=json.dumps(reference_levels, ensure_ascii=False),
+                    review_findings_json=json.dumps(review_findings, ensure_ascii=False),
+                    review_summary=review_summary,
                     content_json=json.dumps(forecast.model_dump(mode="json"), ensure_ascii=False),
                 )
             )

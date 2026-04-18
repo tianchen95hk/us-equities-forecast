@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Callable, Literal
 
+from app.collectors.earnings_revision import collect_earnings_revision_proxy
 from app.collectors.market_data import collect_market_data
 from app.collectors.news import collect_news
 from app.config import Settings
@@ -16,6 +17,13 @@ from app.llm_client import BaseLLMClient, build_llm_client
 from app.pipeline.check_freshness import build_input_freshness_report
 from app.pipeline.confidence import compute_confidence
 from app.pipeline.extract_events import run_event_extraction
+from app.pipeline.factors import build_factor_snapshot
+from app.pipeline.generate_feedback import (
+    build_post_feedback_fallback,
+    build_pre_feedback_fallback,
+    run_post_forecast_feedback,
+    run_pre_forecast_feedback,
+)
 from app.pipeline.map_states import run_state_and_forecast
 from app.pipeline.normalize import normalize_inputs
 from app.pipeline.publish_forecast import select_publishable_forecast
@@ -24,17 +32,27 @@ from app.rules.schema_check import build_rule_report, validate_forecast_rules
 from app.rules.validators import repair_forecast_payload
 from app.schemas import (
     AntiHindsightStatus,
+    DominantFactorResult,
+    EarningsRevisionProxy,
+    FactorSnapshot,
     FinalForecast,
+    GovernanceIssue,
     InputFreshnessReport,
+    IssueSeverity,
     NormalizedInputs,
+    ReferenceLevels,
+    ReviewFindings,
     RuleCheckReport,
     StateMappingResult,
+    PreForecastFeedback,
+    PostForecastFeedback,
 )
 from app.storage.db import Storage
 from app.utils.prompt_loader import PromptLoader
 
 NewsCollector = Callable[[Settings, str | None], tuple[list[dict[str, Any]], str]]
 MarketDataCollector = Callable[[Settings, str | None], tuple[list[dict[str, Any]], str]]
+EarningsProxyCollector = Callable[[Settings], tuple[EarningsRevisionProxy, str]]
 
 
 @dataclass
@@ -45,13 +63,21 @@ class PipelineResult:
     final_forecast: FinalForecast | None
     artifact_paths: dict[str, str]
     publish_status: Literal["approved", "rejected"]
+    run_status: Literal["approved", "review_warn", "review_fail", "input_stale"] = "approved"
+    is_publishable: bool = True
+    review_status: Literal["PASS", "FAIL"] | None = None
+    decision_summary: str = ""
     rejection_reasons: list[str] = field(default_factory=list)
+    review_summary: str = ""
+    review_findings: dict[str, Any] = field(default_factory=dict)
+    reference_levels: dict[str, Any] = field(default_factory=dict)
     collected_at: str | None = None
     reviewed_at: str | None = None
     latest_news_at: str | None = None
     latest_market_at: str | None = None
     run_started_at: str | None = None
     run_completed_at: str | None = None
+    market_universe: list[str] = field(default_factory=list)
     market_snapshot: dict[str, dict[str, Any]] = field(default_factory=dict)
     news_snapshot: list[dict[str, Any]] = field(default_factory=list)
     reasoning_summary: list[str] = field(default_factory=list)
@@ -61,6 +87,21 @@ class PipelineResult:
     analysis_flow: list[dict[str, Any]] = field(default_factory=list)
     analysis_variants: dict[str, Any] = field(default_factory=dict)
     publish_gate_report: dict[str, Any] = field(default_factory=dict)
+    market_snapshot_summary: list[str] = field(default_factory=list)
+    top_news_signals: list[dict[str, Any]] = field(default_factory=list)
+    top_market_signals: list[dict[str, Any]] = field(default_factory=list)
+    signal_conflicts: list[str] = field(default_factory=list)
+    forecast_support_map: list[str] = field(default_factory=list)
+    forecast_opposition_map: list[str] = field(default_factory=list)
+    monitoring_priorities: list[str] = field(default_factory=list)
+    next_run_questions: list[str] = field(default_factory=list)
+    pre_forecast_feedback: dict[str, Any] = field(default_factory=dict)
+    post_forecast_feedback: dict[str, Any] = field(default_factory=dict)
+    factor_snapshot: dict[str, Any] = field(default_factory=dict)
+    dominant_factor: dict[str, Any] = field(default_factory=dict)
+    dominant_factor_explainer: str = ""
+    earnings_revision_proxy_summary: dict[str, Any] = field(default_factory=dict)
+    earnings_proxy_source: str | None = None
 
 
 @dataclass
@@ -69,6 +110,7 @@ class PipelineDependencies:
 
     news_collector: NewsCollector = collect_news
     market_data_collector: MarketDataCollector = collect_market_data
+    earnings_proxy_collector: EarningsProxyCollector = collect_earnings_revision_proxy
     llm_client: BaseLLMClient | None = None
     storage: Storage | None = None
     prompt_loader: PromptLoader | None = None
@@ -85,7 +127,17 @@ def _build_runtime_assertions(
     market_source: str,
 ) -> dict[str, Any]:
     strict_mode_active = bool(settings.use_live_data and settings.strict_live_mode)
-    allowed_news_sources = {"live", "latest_available_cache"}
+    allowed_news_sources = {
+        "live",
+        "latest_available_cache",
+        "live_newsapi",
+        "live_sec",
+        "live_fmp_news",
+        "live_fmp_news+newsapi",
+        "live_newsapi+sec",
+        "live_fmp_news+sec",
+        "live_fmp_news+newsapi+sec",
+    }
     allowed_market_sources = {"live_fmp", "live_fmp+yahoo", "latest_available_cache"}
 
     checks = [
@@ -97,7 +149,7 @@ def _build_runtime_assertions(
         },
         {
             "name": "news_source_allowed",
-            "passed": news_source in allowed_news_sources,
+            "passed": news_source in allowed_news_sources or str(news_source).startswith("live_"),
             "expected": sorted(allowed_news_sources),
             "observed": news_source,
         },
@@ -244,6 +296,8 @@ def _build_news_snapshot(normalized_inputs: NormalizedInputs, top_k: int = 8) ->
     return [
         {
             "source": item.source,
+            "source_type": item.source_type,
+            "source_reliability": item.source_reliability,
             "headline": item.headline,
             "summary": item.summary,
             "url": item.url,
@@ -293,6 +347,8 @@ def _build_llm_normalized_inputs_payload(
         compact_news.append(
             {
                 "source": item.source,
+                "source_type": item.source_type,
+                "source_reliability": item.source_reliability,
                 "headline": _truncate_text(item.headline, max_text_chars),
                 "summary": _truncate_text(item.summary, max_text_chars),
                 "url": item.url,
@@ -411,6 +467,7 @@ def run_pipeline(
     reviewed_at: str | None = None
     latest_news_at: str | None = None
     latest_market_at: str | None = None
+    earnings_proxy_source: str | None = None
     news_source: str | None = None
     market_source: str | None = None
     latest_available_fallback_applied = False
@@ -419,6 +476,10 @@ def run_pipeline(
     reasoning_summary: list[str] = []
     state_snapshot: dict[str, Any] = {}
     confidence_snapshot: dict[str, Any] = {}
+    factor_snapshot_payload: dict[str, Any] = {}
+    dominant_factor_payload: dict[str, Any] = {}
+    dominant_factor_explainer = ""
+    earnings_revision_proxy_summary: dict[str, Any] = {}
     llm_normalized_inputs_payload: dict[str, Any] = {}
     runtime_assertions: dict[str, Any] = {}
     analysis_flow: list[dict[str, Any]] = []
@@ -428,6 +489,25 @@ def run_pipeline(
         "checks": [],
         "rejection_reasons": [],
     }
+    review_status: Literal["PASS", "FAIL"] | None = None
+    decision_summary = ""
+    review_summary_text = ""
+    review_findings_payload: dict[str, Any] = {}
+    reference_levels_payload: dict[str, Any] = {}
+    pre_feedback_result = PreForecastFeedback(
+        generated_at=datetime.now(timezone.utc),
+        market_snapshot_summary=[],
+        top_news_signals=[],
+        top_market_signals=[],
+        signal_conflicts=[],
+    )
+    post_feedback_result = PostForecastFeedback(
+        generated_at=datetime.now(timezone.utc),
+        forecast_support_map=[],
+        forecast_opposition_map=[],
+        monitoring_priorities=[],
+        next_run_questions=[],
+    )
     pipeline_started = perf_counter()
 
     def _finalize_run_timestamp() -> str:
@@ -437,23 +517,51 @@ def run_pipeline(
     def _persist_analysis_trace(
         *,
         publish_status: Literal["approved", "rejected"],
+        run_status: Literal["approved", "review_warn", "review_fail", "input_stale"],
+        is_publishable: bool,
         rejection_reasons: list[str],
         run_completed_at: str,
     ) -> None:
         trace_payload = {
             "run_id": run_id,
             "publish_status": publish_status,
+            "run_status": run_status,
+            "is_publishable": is_publishable,
+            "review_status": review_status,
+            "decision_summary": decision_summary,
             "rejection_reasons": rejection_reasons,
+            "review_summary": review_summary_text,
+            "review_findings": review_findings_payload,
+            "reference_levels": reference_levels_payload,
             "run_started_at": run_started_at_dt.isoformat(),
             "run_completed_at": run_completed_at,
             "runtime_assertions": runtime_assertions,
+            "earnings_proxy_source": earnings_proxy_source,
             "analysis_flow": analysis_flow,
             "analysis_variants": analysis_variants,
             "publish_gate_report": publish_gate_report,
+            "pre_forecast_feedback": pre_feedback_result.model_dump(mode="json"),
+            "post_forecast_feedback": post_feedback_result.model_dump(mode="json"),
+            "market_snapshot_summary": pre_feedback_result.market_snapshot_summary,
+            "top_news_signals": [
+                item.model_dump(mode="json") for item in pre_feedback_result.top_news_signals
+            ],
+            "top_market_signals": [
+                item.model_dump(mode="json") for item in pre_feedback_result.top_market_signals
+            ],
+            "signal_conflicts": pre_feedback_result.signal_conflicts,
+            "forecast_support_map": post_feedback_result.forecast_support_map,
+            "forecast_opposition_map": post_feedback_result.forecast_opposition_map,
+            "monitoring_priorities": post_feedback_result.monitoring_priorities,
+            "next_run_questions": post_feedback_result.next_run_questions,
             "market_snapshot": market_snapshot,
             "news_snapshot": news_snapshot,
             "state_snapshot": state_snapshot,
             "confidence_snapshot": confidence_snapshot,
+            "factor_snapshot": factor_snapshot_payload,
+            "dominant_factor": dominant_factor_payload,
+            "dominant_factor_explainer": dominant_factor_explainer,
+            "earnings_revision_proxy_summary": earnings_revision_proxy_summary,
             "reasoning_summary": reasoning_summary,
             "artifact_paths": dict(artifact_paths),
         }
@@ -577,6 +685,78 @@ def run_pipeline(
             f"max_tokens={settings.llm_max_tokens}"
         )
 
+        earnings_started = perf_counter()
+        earnings_proxy, earnings_proxy_source = deps.earnings_proxy_collector(settings)
+        earnings_elapsed = perf_counter() - earnings_started
+        earnings_revision_proxy_summary = earnings_proxy.model_dump(mode="json")
+        artifact_paths["earnings_revision_proxy"] = str(
+            storage.save_artifact(
+                run_id,
+                stage="intermediate",
+                artifact_name="earnings_revision_proxy.json",
+                payload=earnings_revision_proxy_summary,
+            )
+        )
+        analysis_flow.append(
+            _flow_entry(
+                stage="earnings_revision_proxy",
+                status="ok",
+                elapsed_seconds=earnings_elapsed,
+                output_summary={
+                    "source": earnings_proxy_source,
+                    "coverage_status": earnings_proxy.coverage_status,
+                    "sample_size": earnings_proxy.sample_size,
+                    "available_series": earnings_proxy.available_series,
+                    "score": earnings_proxy.score,
+                },
+                artifacts=["earnings_revision_proxy"],
+            )
+        )
+
+        factor_started = perf_counter()
+        factor_snapshot, dominant_factor = build_factor_snapshot(
+            settings=settings,
+            normalized_inputs=normalized_inputs,
+            earnings_proxy=earnings_proxy,
+            output_language=settings.output_language,
+        )
+        factor_elapsed = perf_counter() - factor_started
+        factor_snapshot_payload = factor_snapshot.model_dump(mode="json")
+        dominant_factor_payload = dominant_factor.model_dump(mode="json")
+        dominant_factor_explainer = dominant_factor.explainer
+        artifact_paths["factor_state_snapshot"] = str(
+            storage.save_artifact(
+                run_id,
+                stage="intermediate",
+                artifact_name="factor_state_snapshot.json",
+                payload={
+                    "factor_snapshot": factor_snapshot_payload,
+                    "dominant_factor_result": dominant_factor_payload,
+                },
+            )
+        )
+        analysis_flow.append(
+            _flow_entry(
+                stage="factor_state_snapshot",
+                status="ok",
+                elapsed_seconds=factor_elapsed,
+                output_summary={
+                    "dominant_factor": dominant_factor.dominant_factor,
+                    "tie_detected": dominant_factor.tie_detected,
+                },
+                artifacts=["factor_state_snapshot"],
+            )
+        )
+        reasoning_summary.append(
+            "五因子方向: "
+            f"earnings={factor_snapshot.earnings_revision.direction.value}, "
+            f"volatility={factor_snapshot.volatility.direction.value}, "
+            f"rates={factor_snapshot.rates.direction.value}, "
+            f"dollar={factor_snapshot.dollar.direction.value}, "
+            f"energy_geo={factor_snapshot.energy_geopolitics.direction.value}; "
+            f"dominant={dominant_factor.dominant_factor}"
+        )
+
         freshness_started = perf_counter()
         freshness_report = build_input_freshness_report(
             normalized_inputs=normalized_inputs,
@@ -684,6 +864,9 @@ def run_pipeline(
                                 "freshness_gate_enabled": freshness_gate_enabled,
                                 "allow_latest_available_fallback": allow_latest_available_fallback,
                                 "input_freshness_report": freshness_report.model_dump(mode="json"),
+                                "earnings_revision_proxy": earnings_revision_proxy_summary,
+                                "factor_snapshot": factor_snapshot_payload,
+                                "dominant_factor_result": dominant_factor_payload,
                                 "runtime_assertions": runtime_assertions,
                                 "publish_gate_report": publish_gate_report,
                             },
@@ -702,24 +885,35 @@ def run_pipeline(
                         )
                     )
                     run_completed_at = _finalize_run_timestamp()
+                    decision_summary = "Input freshness gate failed; run ended as input_stale."
                     _persist_analysis_trace(
                         publish_status="rejected",
+                        run_status="input_stale",
+                        is_publishable=False,
                         rejection_reasons=rejection_reasons,
                         run_completed_at=run_completed_at,
                     )
-                    storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
+                    storage.complete_run(run_id, status="INPUT_STALE")
                     return PipelineResult(
                         run_id=run_id,
                         final_forecast=None,
                         artifact_paths=artifact_paths,
                         publish_status="rejected",
+                        run_status="input_stale",
+                        is_publishable=False,
+                        review_status=None,
+                        decision_summary=decision_summary,
                         rejection_reasons=rejection_reasons,
+                        review_summary=review_summary_text,
+                        review_findings=review_findings_payload,
+                        reference_levels=reference_levels_payload,
                         collected_at=collected_at,
                         reviewed_at=reviewed_at,
                         latest_news_at=latest_news_at,
                         latest_market_at=latest_market_at,
                         run_started_at=run_started_at_dt.isoformat(),
                         run_completed_at=run_completed_at,
+                        market_universe=list(universe),
                         market_snapshot=market_snapshot,
                         news_snapshot=news_snapshot,
                         reasoning_summary=reasoning_summary,
@@ -729,6 +923,11 @@ def run_pipeline(
                         analysis_flow=analysis_flow,
                         analysis_variants=analysis_variants,
                         publish_gate_report=publish_gate_report,
+                        factor_snapshot=factor_snapshot_payload,
+                        dominant_factor=dominant_factor_payload,
+                        dominant_factor_explainer=dominant_factor_explainer,
+                        earnings_revision_proxy_summary=earnings_revision_proxy_summary,
+                        earnings_proxy_source=earnings_proxy_source,
                     )
             else:
                 rejection_reasons = [freshness_report.summary]
@@ -769,6 +968,9 @@ def run_pipeline(
                             "freshness_gate_enabled": freshness_gate_enabled,
                             "allow_latest_available_fallback": allow_latest_available_fallback,
                             "input_freshness_report": freshness_report.model_dump(mode="json"),
+                            "earnings_revision_proxy": earnings_revision_proxy_summary,
+                            "factor_snapshot": factor_snapshot_payload,
+                            "dominant_factor_result": dominant_factor_payload,
                             "runtime_assertions": runtime_assertions,
                             "publish_gate_report": publish_gate_report,
                         },
@@ -787,24 +989,35 @@ def run_pipeline(
                     )
                 )
                 run_completed_at = _finalize_run_timestamp()
+                decision_summary = "Input freshness gate failed; run ended as input_stale."
                 _persist_analysis_trace(
                     publish_status="rejected",
+                    run_status="input_stale",
+                    is_publishable=False,
                     rejection_reasons=rejection_reasons,
                     run_completed_at=run_completed_at,
                 )
-                storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
+                storage.complete_run(run_id, status="INPUT_STALE")
                 return PipelineResult(
                     run_id=run_id,
                     final_forecast=None,
                     artifact_paths=artifact_paths,
                     publish_status="rejected",
+                    run_status="input_stale",
+                    is_publishable=False,
+                    review_status=None,
+                    decision_summary=decision_summary,
                     rejection_reasons=rejection_reasons,
+                    review_summary=review_summary_text,
+                    review_findings=review_findings_payload,
+                    reference_levels=reference_levels_payload,
                     collected_at=collected_at,
                     reviewed_at=reviewed_at,
                     latest_news_at=latest_news_at,
                     latest_market_at=latest_market_at,
                     run_started_at=run_started_at_dt.isoformat(),
                     run_completed_at=run_completed_at,
+                    market_universe=list(universe),
                     market_snapshot=market_snapshot,
                     news_snapshot=news_snapshot,
                     reasoning_summary=reasoning_summary,
@@ -814,6 +1027,11 @@ def run_pipeline(
                     analysis_flow=analysis_flow,
                     analysis_variants=analysis_variants,
                     publish_gate_report=publish_gate_report,
+                    factor_snapshot=factor_snapshot_payload,
+                    dominant_factor=dominant_factor_payload,
+                    dominant_factor_explainer=dominant_factor_explainer,
+                    earnings_revision_proxy_summary=earnings_revision_proxy_summary,
+                    earnings_proxy_source=earnings_proxy_source,
                 )
 
         event_extraction_prompt = prompt_loader.load("event_extraction.txt")
@@ -855,6 +1073,8 @@ def run_pipeline(
             prompt_template=state_forecast_prompt,
             normalized_inputs=normalized_inputs,
             structured_events=structured_events,
+            factor_snapshot=factor_snapshot_payload,
+            dominant_factor=dominant_factor_payload,
             output_language=settings.output_language,
             normalized_inputs_payload=llm_normalized_inputs_payload,
         )
@@ -891,6 +1111,58 @@ def run_pipeline(
                     "draft_directional_bias": forecast_draft.directional_bias.value,
                 },
                 artifacts=["state_mapping", "forecast_draft"],
+            )
+        )
+
+        pre_feedback_started = perf_counter()
+        try:
+            pre_feedback_prompt = prompt_loader.load("pre_forecast_feedback.txt")
+            pre_feedback_result = run_pre_forecast_feedback(
+                llm_client=llm_client,
+                prompt_template=pre_feedback_prompt,
+                normalized_inputs=normalized_inputs,
+                structured_events=structured_events,
+                state_mapping=state_mapping,
+                factor_snapshot=factor_snapshot_payload,
+                dominant_factor_result=dominant_factor_payload,
+                market_snapshot=market_snapshot,
+                news_snapshot=news_snapshot,
+                output_language=settings.output_language,
+                normalized_inputs_payload=llm_normalized_inputs_payload,
+            )
+            pre_feedback_status = "ok"
+            reasoning_summary.append(
+                f"LLM阶段耗时 pre_forecast_feedback={perf_counter() - pre_feedback_started:.2f}s"
+            )
+        except Exception:
+            pre_feedback_result = build_pre_feedback_fallback(
+                normalized_inputs=normalized_inputs,
+                structured_events=structured_events,
+                market_snapshot=market_snapshot,
+            )
+            pre_feedback_status = "fallback"
+            reasoning_summary.append("pre_forecast_feedback 调用失败，已使用确定性 fallback。")
+
+        artifact_paths["pre_forecast_feedback"] = str(
+            storage.save_artifact(
+                run_id,
+                stage="intermediate",
+                artifact_name="pre_forecast_feedback.json",
+                payload=pre_feedback_result.model_dump(mode="json"),
+            )
+        )
+        analysis_flow.append(
+            _flow_entry(
+                stage="pre_forecast_feedback",
+                status=pre_feedback_status,
+                elapsed_seconds=perf_counter() - pre_feedback_started,
+                output_summary={
+                    "market_snapshot_summary_count": len(pre_feedback_result.market_snapshot_summary),
+                    "top_news_signals_count": len(pre_feedback_result.top_news_signals),
+                    "top_market_signals_count": len(pre_feedback_result.top_market_signals),
+                    "signal_conflicts_count": len(pre_feedback_result.signal_conflicts),
+                },
+                artifacts=["pre_forecast_feedback"],
             )
         )
 
@@ -957,9 +1229,17 @@ def run_pipeline(
             )
         )
 
+        review_status = review_result.review_decision.review_status.value
+        decision_summary = review_result.review_decision.decision_summary
+        review_summary_text = review_result.review_summary
+        review_findings_payload = review_result.review_findings.model_dump(mode="json")
+        reference_levels_payload = review_result.reference_levels.model_dump(mode="json")
+
         post_review_rule_report = build_rule_report(
             review_result.reviewed_forecast,
             require_review_status=True,
+            review_summary=review_result.review_summary,
+            reference_levels=review_result.reference_levels,
         )
         artifact_paths["post_review_rule_report"] = str(
             storage.save_artifact(
@@ -975,19 +1255,29 @@ def run_pipeline(
                 status="ok" if not post_review_rule_report.has_blocking_issues else "blocking",
                 elapsed_seconds=0.0,
                 output_summary={
-                    "blocking_issue_count": len(post_review_rule_report.issues),
-                    "warning_count": len(post_review_rule_report.warnings),
+                    "hard_fail_count": len(post_review_rule_report.hard_fail_issues),
+                    "soft_warn_count": len(post_review_rule_report.soft_warnings),
                 },
                 artifacts=["post_review_rule_report"],
             )
         )
 
         publish_candidate = select_publishable_forecast(review_result)
+        publish_candidate_payload = publish_candidate.model_dump(mode="json")
+        if not isinstance(publish_candidate_payload.get("reference_levels"), dict):
+            publish_candidate_payload["reference_levels"] = reference_levels_payload
+        publish_candidate_payload["review_status"] = review_status
+        publish_candidate_payload["anti_hindsight_status"] = review_status
 
         repaired_payload = repair_forecast_payload(
-            publish_candidate.model_dump(mode="json"),
+            publish_candidate_payload,
             output_language=settings.output_language,
         )
+        repaired_payload["review_status"] = review_status
+        repaired_payload["anti_hindsight_status"] = review_status
+        if not isinstance(repaired_payload.get("reference_levels"), dict):
+            repaired_payload["reference_levels"] = reference_levels_payload
+
         confidence_result = compute_confidence(
             state_mapping=state_mapping,
             structured_events_payload=structured_events.model_dump(mode="json"),
@@ -1015,6 +1305,8 @@ def run_pipeline(
         post_repair_rule_report = build_rule_report(
             repaired_payload,
             require_review_status=True,
+            review_summary=review_result.review_summary,
+            reference_levels=review_result.reference_levels,
         )
         artifact_paths["post_repair_rule_report"] = str(
             storage.save_artifact(
@@ -1030,163 +1322,151 @@ def run_pipeline(
                 status="ok" if not post_repair_rule_report.has_blocking_issues else "blocking",
                 elapsed_seconds=0.0,
                 output_summary={
-                    "blocking_issue_count": len(post_repair_rule_report.issues),
-                    "warning_count": len(post_repair_rule_report.warnings),
+                    "hard_fail_count": len(post_repair_rule_report.hard_fail_issues),
+                    "soft_warn_count": len(post_repair_rule_report.soft_warnings),
                 },
                 artifacts=["confidence_breakdown", "post_repair_rule_report"],
             )
         )
 
         final_forecast = FinalForecast.model_validate(repaired_payload)
+        reference_levels_payload = final_forecast.reference_levels.model_dump(mode="json")
         analysis_variants = {
             "draft_forecast": forecast_draft.model_dump(mode="json"),
             "reviewed_forecast": review_result.reviewed_forecast.model_dump(mode="json"),
             "repaired_forecast": repaired_payload,
         }
-
-        rejection_reasons: list[str] = []
-        publish_gate_checks: list[dict[str, Any]] = []
-        if review_result.anti_hindsight_status != AntiHindsightStatus.PASS:
-            rejection_reasons.append("ANTI_HINDSIGHT_FAIL: review status is FAIL")
-            rejection_reasons.extend(review_result.issues)
-            reasoning_summary.append("反后验审查未通过，进入发布拒绝流程")
-            publish_gate_checks.append(
-                _gate_check(
-                    name="top_level_anti_hindsight_status_pass",
-                    passed=False,
-                    detail=f"anti_hindsight_status={review_result.anti_hindsight_status.value}",
-                )
-            )
-        else:
-            publish_gate_checks.append(
-                _gate_check(
-                    name="top_level_anti_hindsight_status_pass",
-                    passed=True,
-                    detail=f"anti_hindsight_status={review_result.anti_hindsight_status.value}",
-                )
-            )
-
-        if final_forecast.anti_hindsight_status != AntiHindsightStatus.PASS:
-            rejection_reasons.append("ANTI_HINDSIGHT_FAIL: reviewed forecast status is FAIL")
-            publish_gate_checks.append(
-                _gate_check(
-                    name="reviewed_forecast_status_pass",
-                    passed=False,
-                    detail=f"anti_hindsight_status={final_forecast.anti_hindsight_status.value}",
-                )
-            )
-        else:
-            publish_gate_checks.append(
-                _gate_check(
-                    name="reviewed_forecast_status_pass",
-                    passed=True,
-                    detail=f"anti_hindsight_status={final_forecast.anti_hindsight_status.value}",
-                )
-            )
-
-        if post_repair_rule_report.has_blocking_issues:
-            rejection_reasons.extend(_rule_issues_to_reasons(post_repair_rule_report))
-            reasoning_summary.append("规则引擎在修复后仍发现阻断项，发布拒绝")
-            publish_gate_checks.append(
-                _gate_check(
-                    name="post_repair_rule_check",
-                    passed=False,
-                    detail=f"blocking_issues={len(post_repair_rule_report.issues)}",
-                )
-            )
-        else:
-            publish_gate_checks.append(
-                _gate_check(
-                    name="post_repair_rule_check",
-                    passed=True,
-                    detail="No blocking rule issues after deterministic repair",
-                )
-            )
-
-        if rejection_reasons:
-            publish_gate_report = {
-                "approved": False,
-                "checks": publish_gate_checks,
-                "rejection_reasons": rejection_reasons,
-            }
-            artifact_paths["review_rejected"] = str(
-                storage.save_artifact(
-                    run_id,
-                    stage="final",
-                    artifact_name="review_rejected.json",
-                    payload={
-                        "publish_status": "rejected",
-                        "rejection_reasons": rejection_reasons,
-                        "review_summary": review_result.review_summary,
-                        "anti_hindsight_status": review_result.anti_hindsight_status.value,
-                        "draft_rule_report": draft_rule_report.model_dump(mode="json"),
-                        "post_review_rule_report": post_review_rule_report.model_dump(mode="json"),
-                        "post_repair_rule_report": post_repair_rule_report.model_dump(mode="json"),
-                        "reviewed_forecast": review_result.reviewed_forecast.model_dump(mode="json"),
-                        "auto_repaired_forecast": repaired_payload,
-                        "runtime_assertions": runtime_assertions,
-                        "analysis_flow": analysis_flow,
-                        "analysis_variants": analysis_variants,
-                        "publish_gate_report": publish_gate_report,
-                    },
-                )
-            )
-            analysis_flow.append(
-                _flow_entry(
-                    stage="publish_gate",
-                    status="rejected",
-                    elapsed_seconds=0.0,
-                    output_summary={
-                        "reason_count": len(rejection_reasons),
-                        "anti_hindsight_status": review_result.anti_hindsight_status.value,
-                    },
-                    artifacts=["review_rejected"],
-                )
-            )
-            run_completed_at = _finalize_run_timestamp()
-            _persist_analysis_trace(
-                publish_status="rejected",
-                rejection_reasons=rejection_reasons,
-                run_completed_at=run_completed_at,
-            )
-            storage.complete_run(run_id, status="REVIEW_REJECTED")
-            return PipelineResult(
-                run_id=run_id,
-                final_forecast=None,
-                artifact_paths=artifact_paths,
-                publish_status="rejected",
-                rejection_reasons=rejection_reasons,
-                collected_at=collected_at,
-                reviewed_at=reviewed_at,
-                latest_news_at=latest_news_at,
-                latest_market_at=latest_market_at,
-                run_started_at=run_started_at_dt.isoformat(),
-                run_completed_at=run_completed_at,
+        post_feedback_started = perf_counter()
+        try:
+            post_feedback_prompt = prompt_loader.load("post_forecast_feedback.txt")
+            post_feedback_result = run_post_forecast_feedback(
+                llm_client=llm_client,
+                prompt_template=post_feedback_prompt,
+                normalized_inputs=normalized_inputs,
+                state_mapping=state_mapping,
+                final_forecast=final_forecast,
+                pre_feedback=pre_feedback_result,
+                factor_snapshot=factor_snapshot_payload,
+                dominant_factor_result=dominant_factor_payload,
                 market_snapshot=market_snapshot,
                 news_snapshot=news_snapshot,
-                reasoning_summary=reasoning_summary,
-                state_snapshot=state_snapshot,
-                confidence_snapshot=confidence_snapshot,
-                runtime_assertions=runtime_assertions,
-                analysis_flow=analysis_flow,
-                analysis_variants=analysis_variants,
-                publish_gate_report=publish_gate_report,
+                output_language=settings.output_language,
+                normalized_inputs_payload=llm_normalized_inputs_payload,
             )
+            post_feedback_status = "ok"
+            reasoning_summary.append(
+                f"LLM阶段耗时 post_forecast_feedback={perf_counter() - post_feedback_started:.2f}s"
+            )
+        except Exception:
+            post_feedback_result = build_post_feedback_fallback(
+                final_forecast=final_forecast,
+                pre_feedback=pre_feedback_result,
+            )
+            post_feedback_status = "fallback"
+            reasoning_summary.append("post_forecast_feedback 调用失败，已使用确定性 fallback。")
 
-        validate_forecast_rules(final_forecast, require_review_status=True)
-        publish_gate_checks.append(
-            _gate_check(
-                name="final_schema_validation",
-                passed=True,
-                detail="validate_forecast_rules passed on final forecast",
+        artifact_paths["post_forecast_feedback"] = str(
+            storage.save_artifact(
+                run_id,
+                stage="intermediate",
+                artifact_name="post_forecast_feedback.json",
+                payload=post_feedback_result.model_dump(mode="json"),
             )
         )
-        publish_gate_report = {
-            "approved": True,
-            "checks": publish_gate_checks,
-            "rejection_reasons": [],
+        analysis_flow.append(
+            _flow_entry(
+                stage="post_forecast_feedback",
+                status=post_feedback_status,
+                elapsed_seconds=perf_counter() - post_feedback_started,
+                output_summary={
+                    "forecast_support_map_count": len(post_feedback_result.forecast_support_map),
+                    "forecast_opposition_map_count": len(post_feedback_result.forecast_opposition_map),
+                    "monitoring_priorities_count": len(post_feedback_result.monitoring_priorities),
+                    "next_run_questions_count": len(post_feedback_result.next_run_questions),
+                },
+                artifacts=["post_forecast_feedback"],
+            )
+        )
+        hard_fail_issues = list(post_repair_rule_report.hard_fail_issues)
+        soft_warnings = list(post_repair_rule_report.soft_warnings)
+        info_notes = list(post_repair_rule_report.info_notes)
+        rejection_reasons: list[str] = []
+        publish_gate_checks: list[dict[str, Any]] = []
+
+        if review_result.review_decision.review_status != AntiHindsightStatus.PASS:
+            hard_fail_issues.append(
+                GovernanceIssue(
+                    code="REVIEW_STATUS_FAIL",
+                    field="review_decision.review_status",
+                    message="Reviewer marked review_status=FAIL",
+                    severity=IssueSeverity.HARD_FAIL,
+                )
+            )
+            rejection_reasons.append("REVIEW_STATUS_FAIL: reviewer marked review_status=FAIL")
+            reasoning_summary.append("审查结论为 FAIL，本次仅保留分析，不进入正式发布层")
+
+        if hard_fail_issues:
+            rejection_reasons.extend(f"{item.code}: {item.message}" for item in hard_fail_issues)
+
+        review_findings_payload = {
+            "hard_fail_issues": [item.model_dump(mode="json") for item in hard_fail_issues],
+            "soft_warnings": [item.model_dump(mode="json") for item in soft_warnings],
+            "info_notes": [item.model_dump(mode="json") for item in info_notes],
         }
-        reasoning_summary.append("审查与规则门禁全部通过，发布最终预测")
+
+        if hard_fail_issues or review_result.review_decision.review_status == AntiHindsightStatus.FAIL:
+            run_status_decision: Literal["approved", "review_warn", "review_fail", "input_stale"] = "review_fail"
+            is_publishable = False
+        elif soft_warnings or review_result.review_decision.soft_warn_count > 0:
+            run_status_decision = "review_warn"
+            is_publishable = True
+        else:
+            run_status_decision = "approved"
+            is_publishable = True
+
+        publish_gate_checks.append(
+            _gate_check(
+                name="review_status_pass",
+                passed=review_result.review_decision.review_status == AntiHindsightStatus.PASS,
+                detail=f"review_status={review_result.review_decision.review_status.value}",
+            )
+        )
+        publish_gate_checks.append(
+            _gate_check(
+                name="hard_fail_issues",
+                passed=not hard_fail_issues,
+                detail=f"hard_fail_count={len(hard_fail_issues)}",
+            )
+        )
+        publish_gate_checks.append(
+            _gate_check(
+                name="soft_warning_observed",
+                passed=not soft_warnings,
+                detail=f"soft_warn_count={len(soft_warnings)}",
+                blocking=False,
+            )
+        )
+
+        publish_gate_report = {
+            "approved": is_publishable,
+            "run_status": run_status_decision,
+            "is_publishable": is_publishable,
+            "checks": publish_gate_checks,
+            "hard_fail_count": len(hard_fail_issues),
+            "soft_warn_count": len(soft_warnings),
+            "rejection_reasons": rejection_reasons,
+        }
+        decision_summary = (
+            review_result.review_decision.decision_summary
+            or (
+                "Hard-fail governance findings present; analysis preserved but not publishable."
+                if run_status_decision == "review_fail"
+                else "Soft warnings present; publishable with caution."
+                if run_status_decision == "review_warn"
+                else "No hard governance issues; publishable."
+            )
+        )
+
         artifact_paths["final_forecast"] = str(
             storage.save_artifact(
                 run_id,
@@ -1195,40 +1475,99 @@ def run_pipeline(
                 payload=final_forecast.model_dump(mode="json"),
             )
         )
+
+        if not is_publishable:
+            artifact_paths["review_rejected"] = str(
+                storage.save_artifact(
+                    run_id,
+                    stage="final",
+                    artifact_name="review_rejected.json",
+                    payload={
+                        "publish_status": "rejected",
+                        "run_status": run_status_decision,
+                        "is_publishable": False,
+                        "rejection_reasons": rejection_reasons,
+                        "review_summary": review_result.review_summary,
+                        "review_status": review_result.review_decision.review_status.value,
+                        "review_findings": review_findings_payload,
+                        "reference_levels": reference_levels_payload,
+                        "draft_rule_report": draft_rule_report.model_dump(mode="json"),
+                        "post_review_rule_report": post_review_rule_report.model_dump(mode="json"),
+                        "post_repair_rule_report": post_repair_rule_report.model_dump(mode="json"),
+                        "reviewed_forecast": review_result.reviewed_forecast.model_dump(mode="json"),
+                        "auto_repaired_forecast": repaired_payload,
+                        "pre_forecast_feedback": pre_feedback_result.model_dump(mode="json"),
+                        "post_forecast_feedback": post_feedback_result.model_dump(mode="json"),
+                        "factor_snapshot": factor_snapshot_payload,
+                        "dominant_factor_result": dominant_factor_payload,
+                        "dominant_factor_explainer": dominant_factor_explainer,
+                        "earnings_revision_proxy": earnings_revision_proxy_summary,
+                        "runtime_assertions": runtime_assertions,
+                        "analysis_flow": analysis_flow,
+                        "analysis_variants": analysis_variants,
+                        "publish_gate_report": publish_gate_report,
+                    },
+                )
+            )
+
         analysis_flow.append(
             _flow_entry(
                 stage="publish_gate",
-                status="approved",
+                status=run_status_decision,
                 elapsed_seconds=0.0,
                 output_summary={
-                    "anti_hindsight_status": final_forecast.anti_hindsight_status.value,
-                    "directional_bias": final_forecast.directional_bias.value,
-                    "confidence": final_forecast.confidence,
+                    "run_status": run_status_decision,
+                    "is_publishable": is_publishable,
+                    "review_status": review_status,
+                    "hard_fail_count": len(hard_fail_issues),
+                    "soft_warn_count": len(soft_warnings),
                 },
-                artifacts=["final_forecast"],
+                artifacts=["final_forecast", *([ "review_rejected"] if not is_publishable else [])],
             )
         )
 
-        storage.save_forecast(run_id, final_forecast)
+        storage.save_forecast(
+            run_id,
+            final_forecast,
+            run_status=run_status_decision,
+            is_publishable=is_publishable,
+            decision_summary=decision_summary,
+            hard_fail_count=len(hard_fail_issues),
+            soft_warn_count=len(soft_warnings),
+            reference_levels=reference_levels_payload,
+            review_findings=review_findings_payload,
+            review_summary=review_summary_text,
+        )
         run_completed_at = _finalize_run_timestamp()
         _persist_analysis_trace(
-            publish_status="approved",
-            rejection_reasons=[],
+            publish_status="approved" if is_publishable else "rejected",
+            run_status=run_status_decision,
+            is_publishable=is_publishable,
+            rejection_reasons=rejection_reasons,
             run_completed_at=run_completed_at,
         )
-        storage.complete_run(run_id, status="SUCCEEDED")
+        storage.complete_run(run_id, status=run_status_decision.upper())
+
         return PipelineResult(
             run_id=run_id,
             final_forecast=final_forecast,
             artifact_paths=artifact_paths,
-            publish_status="approved",
-            rejection_reasons=[],
+            publish_status="approved" if is_publishable else "rejected",
+            run_status=run_status_decision,
+            is_publishable=is_publishable,
+            review_status=review_status,
+            decision_summary=decision_summary,
+            rejection_reasons=rejection_reasons,
+            review_summary=review_summary_text,
+            review_findings=review_findings_payload,
+            reference_levels=reference_levels_payload,
             collected_at=collected_at,
             reviewed_at=reviewed_at,
             latest_news_at=latest_news_at,
             latest_market_at=latest_market_at,
             run_started_at=run_started_at_dt.isoformat(),
             run_completed_at=run_completed_at,
+            market_universe=list(universe),
             market_snapshot=market_snapshot,
             news_snapshot=news_snapshot,
             reasoning_summary=reasoning_summary,
@@ -1238,6 +1577,25 @@ def run_pipeline(
             analysis_flow=analysis_flow,
             analysis_variants=analysis_variants,
             publish_gate_report=publish_gate_report,
+            market_snapshot_summary=pre_feedback_result.market_snapshot_summary,
+            top_news_signals=[
+                item.model_dump(mode="json") for item in pre_feedback_result.top_news_signals
+            ],
+            top_market_signals=[
+                item.model_dump(mode="json") for item in pre_feedback_result.top_market_signals
+            ],
+            signal_conflicts=pre_feedback_result.signal_conflicts,
+            forecast_support_map=post_feedback_result.forecast_support_map,
+            forecast_opposition_map=post_feedback_result.forecast_opposition_map,
+            monitoring_priorities=post_feedback_result.monitoring_priorities,
+            next_run_questions=post_feedback_result.next_run_questions,
+            pre_forecast_feedback=pre_feedback_result.model_dump(mode="json"),
+            post_forecast_feedback=post_feedback_result.model_dump(mode="json"),
+            factor_snapshot=factor_snapshot_payload,
+            dominant_factor=dominant_factor_payload,
+            dominant_factor_explainer=dominant_factor_explainer,
+            earnings_revision_proxy_summary=earnings_revision_proxy_summary,
+            earnings_proxy_source=earnings_proxy_source,
         )
 
     except Exception as exc:

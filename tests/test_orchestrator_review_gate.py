@@ -1,4 +1,4 @@
-"""Integration tests for strict 3-call pipeline and publish gate behavior."""
+"""Integration tests for strict 3-call pipeline and governance publish gate behavior."""
 
 from __future__ import annotations
 
@@ -197,22 +197,89 @@ class CountingLLMClient(BaseLLMClient):
             use_zh = output_language == "zh"
 
             reviewed = dict(draft)
+            reviewed["review_status"] = self.review_status.value
             reviewed["anti_hindsight_status"] = self.review_status.value
             if use_zh and not _CJK_RE.search(str(reviewed.get("final_thesis", ""))):
                 reviewed["final_thesis"] = "结论基于当前可观测条件，若触发失效条件将调整方向判断。"
 
-            issues = []
+            hard_fail_issues: list[dict[str, Any]] = []
             review_summary = "未发现后验叙述问题。" if use_zh else "No hindsight issue detected."
             if self.review_status == AntiHindsightStatus.FAIL:
-                issues = ["Review found unresolved hindsight phrasing"]
+                hard_fail_issues = [
+                    {
+                        "code": "REVIEW_STATUS_FAIL",
+                        "field": "review_decision.review_status",
+                        "message": "Reviewer marked FAIL",
+                        "severity": "hard_fail",
+                    }
+                ]
                 review_summary = "审查未通过：存在未消除的后验描述。" if use_zh else "Review failed due to unresolved hindsight phrasing."
 
             return {
                 "reviewed_at": "2026-04-17T08:07:00Z",
-                "anti_hindsight_status": self.review_status.value,
-                "issues": issues,
+                "review_decision": {
+                    "review_status": self.review_status.value,
+                    "is_publishable": self.review_status == AntiHindsightStatus.PASS,
+                    "decision_summary": review_summary,
+                    "hard_fail_count": len(hard_fail_issues),
+                    "soft_warn_count": 0,
+                },
+                "review_findings": {
+                    "hard_fail_issues": hard_fail_issues,
+                    "soft_warnings": [],
+                    "info_notes": [],
+                },
                 "review_summary": review_summary,
                 "reviewed_forecast": reviewed,
+                "reference_levels": {
+                    "support_levels": ["SPY 500-503"],
+                    "resistance_levels": ["SPY 518-520"],
+                    "risk_triggers": ["VIX > 22"],
+                    "confirmation_levels": ["DXY < 102"],
+                },
+            }
+
+        if task_name == "pre_forecast_feedback":
+            return {
+                "generated_at": "2026-04-17T08:06:30Z",
+                "market_snapshot_summary": [
+                    "SPY/QQQ/IWM日内波动中性偏稳",
+                    "US10Y与DXY边际抬升形成估值压制",
+                ],
+                "top_news_signals": [
+                    {
+                        "signal": "通胀边际降温但政策仍谨慎",
+                        "direction": "neutral",
+                        "confidence": 0.62,
+                        "evidence_refs": ["news:1"],
+                        "rationale": "政策路径仍受数据扰动",
+                    }
+                ],
+                "top_market_signals": [
+                    {
+                        "signal": "US10Y上行",
+                        "direction": "down",
+                        "confidence": 0.61,
+                        "evidence_refs": ["US10Y"],
+                        "rationale": "利率上行压制估值弹性",
+                    }
+                ],
+                "signal_conflicts": ["风险资产韧性与利率上行信号存在冲突"],
+            }
+
+        if task_name == "post_forecast_feedback":
+            return {
+                "generated_at": "2026-04-17T08:07:20Z",
+                "forecast_support_map": [
+                    "中性判断由跨资产信号未形成单边共振支撑",
+                ],
+                "forecast_opposition_map": [
+                    "若利率继续上行，中性判断将面临下修压力",
+                ],
+                "monitoring_priorities": ["VIX", "US10Y", "DXY", "市场广度"],
+                "next_run_questions": [
+                    "利率与美元是否继续同向上行并强化风险压制？",
+                ],
             }
 
         raise AssertionError(f"Unexpected task: {task_name}")
@@ -248,41 +315,47 @@ class OrchestratorReviewGateTests(unittest.TestCase):
         )
         return run_pipeline(settings=self.settings, dependencies=deps)
 
-    def test_pipeline_uses_exactly_three_llm_calls(self) -> None:
+    def test_pipeline_uses_expected_feedback_extended_llm_calls(self) -> None:
         llm_client = CountingLLMClient(review_status=AntiHindsightStatus.PASS)
         result = self._run(llm_client)
 
         self.assertEqual(result.publish_status, "approved")
         self.assertEqual(
             llm_client.calls,
-            ["event_extraction", "state_and_forecast", "anti_hindsight_review"],
+            [
+                "event_extraction",
+                "state_and_forecast",
+                "pre_forecast_feedback",
+                "anti_hindsight_review",
+                "post_forecast_feedback",
+            ],
         )
         self.assertNotIn("state_mapping", llm_client.calls)
         self.assertNotIn("forecast_generation", llm_client.calls)
+        self.assertGreater(len(result.market_snapshot_summary), 0)
+        self.assertGreater(len(result.top_news_signals), 0)
+        self.assertGreater(len(result.forecast_support_map), 0)
+        self.assertIn("earnings_revision_proxy", result.artifact_paths)
+        self.assertIn("factor_state_snapshot", result.artifact_paths)
+        self.assertIsInstance(result.dominant_factor, dict)
 
-    def test_publish_gate_rejects_fail_review_and_skips_forecast_table_write(self) -> None:
+    def test_publish_gate_rejects_fail_review_but_preserves_analysis_and_persists(self) -> None:
         llm_client = CountingLLMClient(review_status=AntiHindsightStatus.FAIL)
         result = self._run(llm_client)
 
         self.assertEqual(result.publish_status, "rejected")
-        self.assertIsNone(result.final_forecast)
+        self.assertIsNotNone(result.final_forecast)
         self.assertIn("review_rejected", result.artifact_paths)
         self.assertIn("analysis_trace", result.artifact_paths)
-        self.assertNotIn("final_forecast", result.artifact_paths)
+        self.assertIn("final_forecast", result.artifact_paths)
 
         review_rejected_path = Path(result.artifact_paths["review_rejected"])
         self.assertTrue(review_rejected_path.exists())
         payload = json.loads(review_rejected_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["publish_status"], "rejected")
         self.assertIn("analysis_variants", payload)
+        self.assertIn("reviewed_forecast", payload)
         self.assertIn("publish_gate_report", payload)
-
-        analysis_trace_path = Path(result.artifact_paths["analysis_trace"])
-        self.assertTrue(analysis_trace_path.exists())
-        analysis_trace = json.loads(analysis_trace_path.read_text(encoding="utf-8"))
-        self.assertEqual(analysis_trace["publish_status"], "rejected")
-        self.assertIn("analysis_flow", analysis_trace)
-        self.assertIn("runtime_assertions", analysis_trace)
 
         with sqlite3.connect(self.db_path) as conn:
             forecast_count = conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
@@ -290,9 +363,14 @@ class OrchestratorReviewGateTests(unittest.TestCase):
                 "SELECT status FROM runs WHERE id = ?",
                 (result.run_id,),
             ).fetchone()[0]
+            publishable = conn.execute(
+                "SELECT is_publishable FROM forecasts WHERE run_id = ?",
+                (result.run_id,),
+            ).fetchone()[0]
 
-        self.assertEqual(forecast_count, 0)
-        self.assertEqual(run_status, "REVIEW_REJECTED")
+        self.assertEqual(forecast_count, 1)
+        self.assertEqual(run_status, "REVIEW_FAIL")
+        self.assertEqual(publishable, 0)
 
     def test_approved_publish_writes_forecast_and_run_status(self) -> None:
         llm_client = CountingLLMClient(review_status=AntiHindsightStatus.PASS)
@@ -311,7 +389,7 @@ class OrchestratorReviewGateTests(unittest.TestCase):
             ).fetchone()[0]
 
         self.assertEqual(forecast_count, 1)
-        self.assertEqual(run_status, "SUCCEEDED")
+        self.assertEqual(run_status, "APPROVED")
 
         analysis_trace_path = Path(result.artifact_paths["analysis_trace"])
         self.assertTrue(analysis_trace_path.exists())

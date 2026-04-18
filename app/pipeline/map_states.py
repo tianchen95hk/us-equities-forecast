@@ -71,6 +71,8 @@ def _build_fallback_forecast_draft(
     state_mapping: dict[str, Any],
     normalized_inputs: NormalizedInputs,
     structured_events: EventExtractionResult,
+    factor_snapshot: dict[str, Any] | None,
+    dominant_factor: dict[str, Any] | None,
     output_language: str,
 ) -> dict[str, Any]:
     scenarios = state_mapping.get("scenarios", [])
@@ -105,11 +107,17 @@ def _build_fallback_forecast_draft(
         if event.impact_bias == "down" and event.description.strip()
     ]
 
+    dominant_label = ""
+    if isinstance(dominant_factor, dict):
+        dominant_label = str(dominant_factor.get("dominant_factor", "")).strip()
+
     if output_language.lower() == "zh":
         dominant_drivers = _coerce_str_list(
             state_mapping.get("cross_asset_signals"),
             ["跨资产信号显示当前处于过渡状态，需要结合触发条件动态调整。"],
         )[:3]
+        if dominant_label:
+            dominant_drivers = [f"主导因子：{dominant_label}", *dominant_drivers][:4]
         supportive_evidence = up_events[:2] or event_desc[:2] or ["当前可观测信号未出现系统性恶化。"]
         opposing_evidence = down_events[:2] or ["部分事件信号与主方向存在冲突。"]
         upside_triggers = [
@@ -131,6 +139,8 @@ def _build_fallback_forecast_draft(
         )
     else:
         dominant_drivers = signals[:3]
+        if dominant_label:
+            dominant_drivers = [f"Dominant factor: {dominant_label}", *dominant_drivers][:4]
         supportive_evidence = up_events[:2] or event_desc[:2] or ["Current observable signals are not deteriorating systemically."]
         opposing_evidence = down_events[:2] or ["Some incoming events conflict with the base direction."]
         upside_triggers = [
@@ -173,6 +183,8 @@ def _normalize_state_and_forecast_response(
     response: dict[str, Any],
     normalized_inputs: NormalizedInputs,
     structured_events: EventExtractionResult,
+    factor_snapshot: dict[str, Any] | None,
+    dominant_factor: dict[str, Any] | None,
     output_language: str,
 ) -> dict[str, Any]:
     if not isinstance(response, dict):
@@ -198,6 +210,8 @@ def _normalize_state_and_forecast_response(
             state_mapping=state_mapping if isinstance(state_mapping, dict) else {},
             normalized_inputs=normalized_inputs,
             structured_events=structured_events,
+            factor_snapshot=factor_snapshot,
+            dominant_factor=dominant_factor,
             output_language=output_language,
         )
 
@@ -209,6 +223,8 @@ def run_state_and_forecast(
     prompt_template: str,
     normalized_inputs: NormalizedInputs,
     structured_events: EventExtractionResult,
+    factor_snapshot: dict[str, Any] | None = None,
+    dominant_factor: dict[str, Any] | None = None,
     output_language: str = "zh",
     normalized_inputs_payload: dict[str, object] | None = None,
 ) -> StateAndForecastResult:
@@ -220,6 +236,8 @@ def run_state_and_forecast(
             else normalized_inputs.model_dump(mode="json")
         ),
         "structured_events": structured_events.model_dump(mode="json"),
+        "factor_snapshot": factor_snapshot or {},
+        "dominant_factor_result": dominant_factor or {},
         "output_language": output_language,
     }
 
@@ -232,6 +250,8 @@ def run_state_and_forecast(
                 response=response,
                 normalized_inputs=normalized_inputs,
                 structured_events=structured_events,
+                factor_snapshot=factor_snapshot,
+                dominant_factor=dominant_factor,
                 output_language=output_language,
             )
             return StateAndForecastResult.model_validate(normalized_response)

@@ -90,13 +90,64 @@ class MinimalPassLLMClient(BaseLLMClient):
 
         if task_name == "anti_hindsight_review":
             reviewed = dict(payload["forecast_draft"])
+            reviewed["review_status"] = AntiHindsightStatus.PASS.value
             reviewed["anti_hindsight_status"] = AntiHindsightStatus.PASS.value
             return {
                 "reviewed_at": "2026-04-17T10:02:00Z",
-                "anti_hindsight_status": AntiHindsightStatus.PASS.value,
-                "issues": [],
+                "review_decision": {
+                    "review_status": AntiHindsightStatus.PASS.value,
+                    "is_publishable": True,
+                    "decision_summary": "No hindsight issue detected.",
+                    "hard_fail_count": 0,
+                    "soft_warn_count": 0,
+                },
+                "review_findings": {
+                    "hard_fail_issues": [],
+                    "soft_warnings": [],
+                    "info_notes": [],
+                },
                 "review_summary": "No hindsight issue detected.",
                 "reviewed_forecast": reviewed,
+                "reference_levels": {
+                    "support_levels": [],
+                    "resistance_levels": [],
+                    "risk_triggers": [],
+                    "confirmation_levels": [],
+                },
+            }
+
+        if task_name == "pre_forecast_feedback":
+            return {
+                "generated_at": "2026-04-17T10:01:20Z",
+                "market_snapshot_summary": ["市场处于震荡状态"],
+                "top_news_signals": [
+                    {
+                        "signal": "Cross-asset signal remains mixed",
+                        "direction": "mixed",
+                        "confidence": 0.58,
+                        "evidence_refs": ["stub"],
+                        "rationale": "news and market directions diverge",
+                    }
+                ],
+                "top_market_signals": [
+                    {
+                        "signal": "US10Y change positive",
+                        "direction": "down",
+                        "confidence": 0.6,
+                        "evidence_refs": ["US10Y"],
+                        "rationale": "higher rates can pressure valuation",
+                    }
+                ],
+                "signal_conflicts": ["risk assets stable while rates remain elevated"],
+            }
+
+        if task_name == "post_forecast_feedback":
+            return {
+                "generated_at": "2026-04-17T10:02:10Z",
+                "forecast_support_map": ["neutral bias aligns with mixed cross-asset inputs"],
+                "forecast_opposition_map": ["oil remains elevated and may skew downside"],
+                "monitoring_priorities": ["VIX", "US10Y", "DXY"],
+                "next_run_questions": ["Will rates and dollar continue to rise together?"],
             }
 
         raise AssertionError(f"Unexpected task: {task_name}")
@@ -241,7 +292,7 @@ class OrchestratorFreshnessGateTests(unittest.TestCase):
             ).fetchone()[0]
 
         self.assertEqual(forecast_count, 0)
-        self.assertEqual(run_status, "INPUT_STALE_REJECTED")
+        self.assertEqual(run_status, "INPUT_STALE")
 
     def test_stale_inputs_continue_when_latest_available_fallback_enabled(self) -> None:
         fallback_settings = self.settings.model_copy(
@@ -266,7 +317,13 @@ class OrchestratorFreshnessGateTests(unittest.TestCase):
         self.assertIn("analysis_trace", result.artifact_paths)
         self.assertEqual(
             llm_client.calls,
-            ["event_extraction", "state_and_forecast", "anti_hindsight_review"],
+            [
+                "event_extraction",
+                "state_and_forecast",
+                "pre_forecast_feedback",
+                "anti_hindsight_review",
+                "post_forecast_feedback",
+            ],
         )
 
 

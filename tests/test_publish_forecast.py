@@ -11,6 +11,8 @@ from app.schemas import (
     AntiHindsightStatus,
     DirectionalBias,
     FinalForecast,
+    ReviewDecision,
+    ReviewFindings,
 )
 
 
@@ -19,7 +21,7 @@ class PublishForecastTests(unittest.TestCase):
         reviewed = FinalForecast(
             generated_at=datetime.now(timezone.utc),
             forecast_horizon="5 trading days",
-            market_universe=["SPY", "QQQ", "IWM", "VIX", "US10Y", "DXY", "OIL"],
+            market_universe=["SPY", "QQQ", "IWM", "VIX", "US10Y", "DXY", "OIL", "BTC", "USDJPY"],
             directional_bias=DirectionalBias.BEARISH,
             confidence=0.63,
             dominant_drivers=["Liquidity pressure"],
@@ -34,8 +36,14 @@ class PublishForecastTests(unittest.TestCase):
         )
         review_result = AntiHindsightReviewResult(
             reviewed_at=datetime.now(timezone.utc),
-            anti_hindsight_status=AntiHindsightStatus.PASS,
-            issues=[],
+            review_decision=ReviewDecision(
+                review_status=AntiHindsightStatus.PASS,
+                is_publishable=True,
+                decision_summary="No issues",
+                hard_fail_count=0,
+                soft_warn_count=0,
+            ),
+            review_findings=ReviewFindings(),
             review_summary="No issues",
             reviewed_forecast=reviewed,
         )

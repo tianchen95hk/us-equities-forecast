@@ -15,7 +15,7 @@ Required JSON schema:
 {
   "generated_at": "ISO-8601 timestamp",
   "forecast_horizon": "string",
-  "market_universe": ["SPY","QQQ","IWM","VIX","US10Y","DXY","OIL"],
+  "market_universe": ["SPY","QQQ","IWM","VIX","US10Y","DXY","OIL","BTC","USDJPY"],
   "directional_bias": "bullish|bearish|neutral",
   "confidence": 0.0,
   "dominant_drivers": ["string"],

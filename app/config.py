@@ -13,6 +13,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_REQUIRED_HARD_INDICATORS: tuple[str, str] = ("BTC", "USDJPY")
+
 
 class Settings(BaseSettings):
     """Runtime configuration for collectors, pipeline, and storage."""
@@ -37,7 +39,17 @@ class Settings(BaseSettings):
 
     forecast_horizon: str = "5 trading days"
     market_universe: list[str] = Field(
-        default_factory=lambda: ["SPY", "QQQ", "IWM", "VIX", "US10Y", "DXY", "OIL"]
+        default_factory=lambda: [
+            "SPY",
+            "QQQ",
+            "IWM",
+            "VIX",
+            "US10Y",
+            "DXY",
+            "OIL",
+            "BTC",
+            "USDJPY",
+        ]
     )
 
     llm_provider: Literal["mock", "openai", "kimi", "minimax"] = "mock"
@@ -74,7 +86,8 @@ class Settings(BaseSettings):
     live_news_query: str = (
         "\"S&P 500\" OR \"Nasdaq 100\" OR \"Russell 2000\" OR "
         "\"VIX\" OR \"Federal Reserve\" OR \"10-year Treasury\" OR "
-        "\"US dollar index\" OR \"WTI crude\""
+        "\"US dollar index\" OR \"WTI crude\" OR "
+        "\"Bitcoin\" OR \"USD/JPY\" OR \"yen\""
     )
     live_news_domains: list[str] = Field(
         default_factory=lambda: [
@@ -88,15 +101,75 @@ class Settings(BaseSettings):
             "barrons.com",
         ]
     )
+    sec_rss_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://www.sec.gov/news/pressreleases.rss",
+            "https://www.sec.gov/news/speeches.rss",
+        ]
+    )
+    fmp_news_limit: int = 40
+
+    earnings_proxy_top_tickers: list[str] = Field(
+        default_factory=lambda: [
+            "AAPL",
+            "MSFT",
+            "NVDA",
+            "AMZN",
+            "GOOGL",
+            "META",
+            "TSLA",
+            "BRK.B",
+            "JPM",
+            "UNH",
+            "XOM",
+            "V",
+            "MA",
+            "AVGO",
+            "LLY",
+            "COST",
+            "PG",
+            "HD",
+            "JNJ",
+            "ABBV",
+            "MRK",
+            "PEP",
+            "KO",
+            "WMT",
+            "BAC",
+            "CVX",
+            "AMD",
+            "NFLX",
+            "ADBE",
+            "CRM",
+        ]
+    )
+    earnings_proxy_live_max_tickers: int = 30
+
+    factor_weight_earnings_revision: float = 0.32
+    factor_weight_volatility: float = 0.22
+    factor_weight_rates: float = 0.18
+    factor_weight_dollar: float = 0.16
+    factor_weight_energy_geopolitics: float = 0.12
+    factor_dominant_tie_threshold: float = 0.10
 
     @field_validator("market_universe", mode="before")
     @classmethod
     def _coerce_market_universe(cls, value: object) -> list[str]:
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            parsed = [item.strip() for item in value.split(",") if item.strip()]
+            return cls._append_required_hard_indicators(parsed)
         if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item).strip()]
+            parsed = [str(item).strip() for item in value if str(item).strip()]
+            return cls._append_required_hard_indicators(parsed)
         raise ValueError("market_universe must be a CSV string or list")
+
+    @staticmethod
+    def _append_required_hard_indicators(items: list[str]) -> list[str]:
+        ordered = list(items)
+        for symbol in _REQUIRED_HARD_INDICATORS:
+            if symbol not in ordered:
+                ordered.append(symbol)
+        return ordered
 
     @field_validator("live_news_domains", mode="before")
     @classmethod
@@ -106,6 +179,24 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
         raise ValueError("live_news_domains must be a CSV string or list")
+
+    @field_validator("sec_rss_urls", mode="before")
+    @classmethod
+    def _coerce_sec_rss_urls(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        raise ValueError("sec_rss_urls must be a CSV string or list")
+
+    @field_validator("earnings_proxy_top_tickers", mode="before")
+    @classmethod
+    def _coerce_earnings_tickers(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip().upper() for item in value.split(",") if item.strip()]
+        if isinstance(value, list):
+            return [str(item).strip().upper() for item in value if str(item).strip()]
+        raise ValueError("earnings_proxy_top_tickers must be a CSV string or list")
 
     def news_from_iso(self) -> str:
         """Return ISO timestamp lower bound for live news query window."""

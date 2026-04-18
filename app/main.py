@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.exceptions import ForecastAppError
 from app.pipeline.orchestrator import PipelineResult, run_pipeline
-from app.presentation.formatters import format_cli_output
+from app.presentation.formatters import format_cli_output, render_cli_output
 from app.storage.db import Storage
 
 
@@ -75,7 +75,14 @@ def _pipeline_result_to_response(result: PipelineResult) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "run_id": result.run_id,
         "publish_status": result.publish_status,
+        "run_status": result.run_status,
+        "is_publishable": result.is_publishable,
+        "review_status": result.review_status,
+        "decision_summary": result.decision_summary,
         "rejection_reasons": result.rejection_reasons,
+        "review_summary": result.review_summary,
+        "review_findings": result.review_findings,
+        "reference_levels": result.reference_levels,
         "artifact_paths": result.artifact_paths,
         "collected_at": result.collected_at,
         "reviewed_at": result.reviewed_at,
@@ -83,6 +90,7 @@ def _pipeline_result_to_response(result: PipelineResult) -> dict[str, Any]:
         "latest_market_at": result.latest_market_at,
         "run_started_at": result.run_started_at,
         "run_completed_at": result.run_completed_at,
+        "market_universe": result.market_universe,
         "market_snapshot": result.market_snapshot,
         "news_snapshot": result.news_snapshot,
         "reasoning_summary": result.reasoning_summary,
@@ -92,13 +100,28 @@ def _pipeline_result_to_response(result: PipelineResult) -> dict[str, Any]:
         "analysis_flow": result.analysis_flow,
         "analysis_variants": result.analysis_variants,
         "publish_gate_report": result.publish_gate_report,
+        "market_snapshot_summary": result.market_snapshot_summary,
+        "top_news_signals": result.top_news_signals,
+        "top_market_signals": result.top_market_signals,
+        "signal_conflicts": result.signal_conflicts,
+        "forecast_support_map": result.forecast_support_map,
+        "forecast_opposition_map": result.forecast_opposition_map,
+        "monitoring_priorities": result.monitoring_priorities,
+        "next_run_questions": result.next_run_questions,
+        "pre_forecast_feedback": result.pre_forecast_feedback,
+        "post_forecast_feedback": result.post_forecast_feedback,
+        "factor_snapshot": result.factor_snapshot,
+        "dominant_factor": result.dominant_factor,
+        "dominant_factor_explainer": result.dominant_factor_explainer,
+        "earnings_revision_proxy_summary": result.earnings_revision_proxy_summary,
+        "earnings_proxy_source": result.earnings_proxy_source,
     }
     if result.final_forecast is not None:
         payload.update(
             {
                 "directional_bias": result.final_forecast.directional_bias.value,
                 "confidence": result.final_forecast.confidence,
-                "anti_hindsight_status": result.final_forecast.anti_hindsight_status.value,
+                "anti_hindsight_status": result.final_forecast.review_status.value,
                 "final_forecast": result.final_forecast.model_dump(mode="json"),
             }
         )
@@ -123,6 +146,7 @@ def run_cli(args: argparse.Namespace) -> int:
 
     output_language = args.output_lang or settings.output_language
     output_style = args.output_style or settings.output_style
+    output_format = args.output_format or "text"
 
     try:
         result = run_pipeline(
@@ -140,8 +164,12 @@ def run_cli(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "error", "message": str(exc)}, indent=2, ensure_ascii=False))
         return 1
 
-    rendered = format_cli_output(result, language=output_language, style=output_style)
-    print(json.dumps(rendered, indent=2, ensure_ascii=False))
+    if output_format == "json":
+        rendered = format_cli_output(result, language=output_language, style=output_style)
+        print(json.dumps(rendered, indent=2, ensure_ascii=False))
+    else:
+        rendered_text = render_cli_output(result, language=output_language, style=output_style)
+        print(rendered_text)
     return 0
 
 
@@ -192,6 +220,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["simple", "telegram", "full"],
         default=None,
         help="CLI output style. Defaults to OUTPUT_STYLE from .env.",
+    )
+    run_parser.add_argument(
+        "--output-format",
+        choices=["text", "json"],
+        default="text",
+        help="CLI render format. Use text for readable panel, json for machine parsing.",
     )
 
     serve_parser = subparsers.add_parser("serve", help="Run FastAPI server")

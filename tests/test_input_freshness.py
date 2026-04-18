@@ -15,7 +15,7 @@ class InputFreshnessTests(unittest.TestCase):
             run_id="run_test",
             collected_at=now,
             forecast_horizon="5 trading days",
-            market_universe=["SPY", "QQQ", "IWM", "VIX", "US10Y", "DXY", "OIL"],
+            market_universe=["SPY", "QQQ", "IWM", "VIX", "US10Y", "DXY", "OIL", "BTC", "USDJPY"],
             news=[
                 NewsItem(
                     source="test",

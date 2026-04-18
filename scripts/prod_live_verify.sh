@@ -169,8 +169,9 @@ path = sys.argv[2]
 payload = json.loads(open(path, "r", encoding="utf-8").read())
 
 if style == "telegram":
-    run_id = payload.get("运行信息", {}).get("运行ID")
-    publish_status = payload.get("发布状态")
+    conclusion = payload.get("结论", {})
+    run_id = conclusion.get("运行ID") or payload.get("运行信息", {}).get("运行ID")
+    publish_status = conclusion.get("发布状态") or payload.get("发布状态")
     runtime = payload.get("运行断言", {})
 else:
     run_id = payload.get("run_id")
@@ -183,8 +184,8 @@ market_source = runtime.get("市场来源") if isinstance(runtime, dict) and "�
 
 if not all_passed:
     raise SystemExit("runtime_assertions did not pass")
-if news_source != "live":
-    raise SystemExit(f"news_source is not live: {news_source}")
+if not isinstance(news_source, str) or not news_source.startswith("live"):
+    raise SystemExit(f"news_source is not live*: {news_source}")
 if market_source not in {"live_fmp", "live_fmp+yahoo"}:
     raise SystemExit(f"market_source is not live_fmp/live_fmp+yahoo: {market_source}")
 

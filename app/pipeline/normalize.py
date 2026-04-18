@@ -7,6 +7,9 @@ from typing import Any
 
 from app.schemas import MarketIndicator, NewsItem, NormalizedInputs
 
+_NEWS_SOURCE_TYPES = {"newsapi", "sec", "fmp_news", "manual", "mock", "other"}
+_NEWS_SOURCE_RELIABILITY = {"very_high", "high", "medium", "unknown"}
+
 
 def _parse_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
@@ -34,6 +37,16 @@ def _safe_change_pct(indicator_map: dict[str, MarketIndicator], symbol: str) -> 
     return float(indicator.change_pct)
 
 
+def _normalize_news_source_type(value: Any) -> str:
+    text = str(value or "other").strip().lower()
+    return text if text in _NEWS_SOURCE_TYPES else "other"
+
+
+def _normalize_news_reliability(value: Any) -> str:
+    text = str(value or "unknown").strip().lower()
+    return text if text in _NEWS_SOURCE_RELIABILITY else "unknown"
+
+
 def _derive_state_variables(indicators: list[MarketIndicator]) -> dict[str, Any]:
     indicator_map = {indicator.symbol: indicator for indicator in indicators}
 
@@ -47,6 +60,8 @@ def _derive_state_variables(indicators: list[MarketIndicator]) -> dict[str, Any]
     us10y = indicator_map.get("US10Y")
     dxy = indicator_map.get("DXY")
     oil = indicator_map.get("OIL")
+    btc = indicator_map.get("BTC")
+    usdjpy = indicator_map.get("USDJPY")
 
     return {
         "risk_assets_avg_change_pct": round(risk_average_change, 4),
@@ -54,6 +69,8 @@ def _derive_state_variables(indicators: list[MarketIndicator]) -> dict[str, Any]
         "rates_regime": "rising" if us10y and (us10y.change_pct or 0.0) > 0.2 else "stable",
         "dollar_regime": "stronger" if dxy and (dxy.change_pct or 0.0) > 0.2 else "stable",
         "oil_regime": "up-shock" if oil and (oil.change_pct or 0.0) > 1.0 else "stable",
+        "crypto_risk_regime": "risk-on" if btc and (btc.change_pct or 0.0) > 1.0 else "neutral",
+        "yen_carry_regime": "carry-on" if usdjpy and (usdjpy.change_pct or 0.0) > 0.2 else "stable",
     }
 
 
@@ -69,6 +86,8 @@ def normalize_inputs(
     normalized_news = [
         NewsItem(
             source=str(news_item.get("source", "unknown")),
+            source_type=_normalize_news_source_type(news_item.get("source_type")),
+            source_reliability=_normalize_news_reliability(news_item.get("source_reliability")),
             headline=str(news_item.get("headline", "")).strip(),
             summary=str(news_item.get("summary", "")).strip(),
             url=news_item.get("url"),

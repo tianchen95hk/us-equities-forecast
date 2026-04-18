@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -45,7 +45,7 @@ class ArtifactRecord(Base):
 
 
 class ForecastRecord(Base):
-    """Stored final forecast snapshot per run."""
+    """Stored forecast snapshot per run (publishable or non-publishable)."""
 
     __tablename__ = "forecasts"
 
@@ -54,6 +54,15 @@ class ForecastRecord(Base):
     directional_bias: Mapped[str] = mapped_column(String(32), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     anti_hindsight_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    review_status: Mapped[str] = mapped_column(String(16), nullable=False, default="FAIL")
+    run_status: Mapped[str] = mapped_column(String(32), nullable=False, default="review_fail")
+    is_publishable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    decision_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hard_fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    soft_warn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reference_levels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_findings_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False

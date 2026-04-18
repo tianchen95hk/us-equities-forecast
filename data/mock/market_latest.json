@@ -61,5 +61,23 @@
     "change_pct": 0.99,
     "unit": "usd",
     "as_of": "2026-04-17T20:00:00Z"
+  },
+  {
+    "symbol": "BTC",
+    "name": "Bitcoin USD Spot Proxy",
+    "value": 84250.0,
+    "previous_value": 82800.0,
+    "change_pct": 1.75,
+    "unit": "usd",
+    "as_of": "2026-04-17T20:00:00Z"
+  },
+  {
+    "symbol": "USDJPY",
+    "name": "USD/JPY FX Rate",
+    "value": 152.25,
+    "previous_value": 151.72,
+    "change_pct": 0.35,
+    "unit": "fx",
+    "as_of": "2026-04-17T20:00:00Z"
   }
 ]
