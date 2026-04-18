@@ -160,7 +160,7 @@ run_and_assert() {
   STRICT_LIVE_MODE=true \
   USE_LIVE_DATA=true \
   LLM_PROVIDER=minimax \
-  "$PYTHON_BIN" -m app.main run --live --output-lang zh --output-style "$style" > "$output_file"
+  "$PYTHON_BIN" -m app.main run --live --output-lang zh --output-style "$style" --output-format json > "$output_file"
 
   "$PYTHON_BIN" - "$style" "$output_file" <<'PY'
 import json, sys
