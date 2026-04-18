@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from app.exceptions import RuleViolationError
-from app.rules.anti_hindsight import scan_text_for_violations
+from app.rules.anti_hindsight import find_banned_phrase_issues, is_valid_review_status
 from app.schemas import ForecastDraft, FinalForecast, RuleCheckItem, RuleCheckReport, RuleSeverity
 
 _REQUIRED_TEXT_LIST_FIELDS: tuple[str, ...] = (
@@ -41,7 +41,11 @@ def _has_parseable_horizon(horizon: str) -> bool:
     return any(pattern.search(horizon) for pattern in _HORIZON_PATTERNS)
 
 
-def build_rule_report(forecast: ForecastDraft | FinalForecast | dict[str, Any]) -> RuleCheckReport:
+def build_rule_report(
+    forecast: ForecastDraft | FinalForecast | dict[str, Any],
+    *,
+    require_review_status: bool = False,
+) -> RuleCheckReport:
     """Build a structured rule report without raising exceptions."""
     payload = _payload_from_forecast(forecast)
     issues: list[RuleCheckItem] = []
@@ -55,6 +59,7 @@ def build_rule_report(forecast: ForecastDraft | FinalForecast | dict[str, Any]) 
         "price_target_scan_checked": True,
         "hindsight_scan_checked": True,
         "final_thesis_length_checked": True,
+        "review_status_checked": require_review_status,
     }
 
     for field_name in _REQUIRED_TEXT_LIST_FIELDS:
@@ -115,7 +120,18 @@ def build_rule_report(forecast: ForecastDraft | FinalForecast | dict[str, Any]) 
             )
         )
 
-    violations = scan_text_for_violations(payload)
+    if require_review_status:
+        review_status = payload.get("anti_hindsight_status")
+        if not is_valid_review_status(review_status):
+            issues.append(
+                RuleCheckItem(
+                    code="REVIEW_STATUS_INVALID",
+                    message="`anti_hindsight_status` must be explicitly set to PASS or FAIL",
+                    severity=RuleSeverity.BLOCKING,
+                )
+            )
+
+    violations = find_banned_phrase_issues(payload)
     for idx, detail in enumerate(violations["price_target_issues"], start=1):
         issues.append(
             RuleCheckItem(
@@ -153,9 +169,13 @@ def build_rule_report(forecast: ForecastDraft | FinalForecast | dict[str, Any]) 
     )
 
 
-def validate_forecast_rules(forecast: ForecastDraft | FinalForecast | dict[str, Any]) -> None:
+def validate_forecast_rules(
+    forecast: ForecastDraft | FinalForecast | dict[str, Any],
+    *,
+    require_review_status: bool = False,
+) -> None:
     """Validate a forecast payload and raise on blocking issues."""
-    report = build_rule_report(forecast)
+    report = build_rule_report(forecast, require_review_status=require_review_status)
     if not report.has_blocking_issues:
         return
 

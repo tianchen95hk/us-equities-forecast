@@ -30,6 +30,12 @@ def format_cli_output(
             "market_snapshot": result.market_snapshot,
             "news_snapshot": result.news_snapshot,
             "reasoning_summary": result.reasoning_summary,
+            "state_snapshot": result.state_snapshot,
+            "confidence_snapshot": result.confidence_snapshot,
+            "runtime_assertions": result.runtime_assertions,
+            "analysis_flow": result.analysis_flow,
+            "analysis_variants": result.analysis_variants,
+            "publish_gate_report": result.publish_gate_report,
         }
         if result.final_forecast is not None:
             payload["final_forecast"] = result.final_forecast.model_dump(mode="json")
@@ -74,7 +80,11 @@ def _to_telegram_zh(result: PipelineResult) -> dict[str, Any]:
             "拒绝原因": result.rejection_reasons,
             "市场信息": _market_snapshot_zh(result),
             "最新新闻": _news_snapshot_zh(result),
-            "思维总结": _thinking_summary_zh(result),
+            "思维总结": _thinking_summary_telegram_zh(result),
+            "运行断言": _runtime_assertions_zh(result),
+            "发布门禁": result.publish_gate_report,
+            "流程阶段": _analysis_flow_summary(result),
+            "分析版本": result.analysis_variants,
             "判断摘要": result.reasoning_summary,
             "文件路径": result.artifact_paths,
         }
@@ -103,15 +113,13 @@ def _to_telegram_zh(result: PipelineResult) -> dict[str, Any]:
             "支持证据": forecast.supportive_evidence,
             "反对证据": forecast.opposing_evidence,
         },
-        "条件结构": {
-            "上行触发": forecast.upside_triggers,
-            "下行触发": forecast.downside_triggers,
-            "失效条件": forecast.invalidation_conditions,
-            "重点监控": forecast.monitoring_list,
-        },
+        "条件结构": _condition_structure_zh(result),
         "市场信息": _market_snapshot_zh(result),
         "最新新闻": _news_snapshot_zh(result),
-        "思维总结": _thinking_summary_zh(result),
+        "思维总结": _thinking_summary_telegram_zh(result),
+        "运行断言": _runtime_assertions_zh(result),
+        "发布门禁": result.publish_gate_report,
+        "流程阶段": _analysis_flow_summary(result),
         "判断摘要": result.reasoning_summary,
         "文件路径": {
             "最终结果": result.artifact_paths.get("final_forecast"),
@@ -138,7 +146,11 @@ def _to_telegram_en(result: PipelineResult) -> dict[str, Any]:
             "rejection_reasons": result.rejection_reasons,
             "market_snapshot": _market_snapshot_en(result),
             "news_snapshot": _news_snapshot_en(result),
-            "thinking_summary": _thinking_summary_en(result),
+            "thinking_summary": _thinking_summary_telegram_en(result),
+            "runtime_assertions": result.runtime_assertions,
+            "publish_gate_report": result.publish_gate_report,
+            "analysis_flow": _analysis_flow_summary(result),
+            "analysis_variants": result.analysis_variants,
             "reasoning_summary": result.reasoning_summary,
             "artifact_paths": result.artifact_paths,
         }
@@ -167,15 +179,13 @@ def _to_telegram_en(result: PipelineResult) -> dict[str, Any]:
             "supportive_evidence": forecast.supportive_evidence,
             "opposing_evidence": forecast.opposing_evidence,
         },
-        "conditions": {
-            "upside_triggers": forecast.upside_triggers,
-            "downside_triggers": forecast.downside_triggers,
-            "invalidation_conditions": forecast.invalidation_conditions,
-            "monitoring_list": forecast.monitoring_list,
-        },
+        "conditions": _condition_structure_en(result),
         "market_snapshot": _market_snapshot_en(result),
         "news_snapshot": _news_snapshot_en(result),
-        "thinking_summary": _thinking_summary_en(result),
+        "thinking_summary": _thinking_summary_telegram_en(result),
+        "runtime_assertions": result.runtime_assertions,
+        "publish_gate_report": result.publish_gate_report,
+        "analysis_flow": _analysis_flow_summary(result),
         "reasoning_summary": result.reasoning_summary,
         "artifact_paths": {
             "final_forecast": result.artifact_paths.get("final_forecast"),
@@ -198,6 +208,9 @@ def _to_simple_zh(result: PipelineResult) -> dict[str, Any]:
             "市场信息": _market_snapshot_zh(result),
             "最新新闻": _news_snapshot_zh(result),
             "思维总结": _thinking_summary_zh(result),
+            "运行断言": _runtime_assertions_zh(result),
+            "发布门禁": result.publish_gate_report,
+            "流程阶段": _analysis_flow_summary(result),
             "判断摘要": result.reasoning_summary,
             "文件路径": {
                 "拒绝详情": reject_detail_path,
@@ -225,6 +238,9 @@ def _to_simple_zh(result: PipelineResult) -> dict[str, Any]:
         "市场信息": _market_snapshot_zh(result),
         "最新新闻": _news_snapshot_zh(result),
         "思维总结": _thinking_summary_zh(result),
+        "运行断言": _runtime_assertions_zh(result),
+        "发布门禁": result.publish_gate_report,
+        "流程阶段": _analysis_flow_summary(result),
         "判断摘要": result.reasoning_summary,
         "文件路径": {
             "最终结果": result.artifact_paths.get("final_forecast"),
@@ -247,6 +263,9 @@ def _to_simple_en(result: PipelineResult) -> dict[str, Any]:
             "market_snapshot": _market_snapshot_en(result),
             "news_snapshot": _news_snapshot_en(result),
             "thinking_summary": _thinking_summary_en(result),
+            "runtime_assertions": result.runtime_assertions,
+            "publish_gate_report": result.publish_gate_report,
+            "analysis_flow": _analysis_flow_summary(result),
             "reasoning_summary": result.reasoning_summary,
             "artifact_paths": {
                 "rejected_detail": reject_detail_path,
@@ -274,6 +293,9 @@ def _to_simple_en(result: PipelineResult) -> dict[str, Any]:
         "market_snapshot": _market_snapshot_en(result),
         "news_snapshot": _news_snapshot_en(result),
         "thinking_summary": _thinking_summary_en(result),
+        "runtime_assertions": result.runtime_assertions,
+        "publish_gate_report": result.publish_gate_report,
+        "analysis_flow": _analysis_flow_summary(result),
         "reasoning_summary": result.reasoning_summary,
         "artifact_paths": {
             "final_forecast": result.artifact_paths.get("final_forecast"),
@@ -338,11 +360,15 @@ def _market_snapshot_en(result: PipelineResult) -> list[dict[str, Any]]:
 def _news_snapshot_zh(result: PipelineResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in result.news_snapshot:
+        age_minutes = _minutes_from_base(result.collected_at, item.get("published_at"))
         rows.append(
             {
                 "来源": item.get("source"),
                 "标题": item.get("headline"),
-                "时间": _fmt_dt(item.get("published_at")),
+                "摘要": item.get("summary") or "",
+                "发布时间": _fmt_dt(item.get("published_at")),
+                "距采集分钟": age_minutes,
+                "链接": item.get("url"),
             }
         )
     return rows
@@ -351,11 +377,15 @@ def _news_snapshot_zh(result: PipelineResult) -> list[dict[str, Any]]:
 def _news_snapshot_en(result: PipelineResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in result.news_snapshot:
+        age_minutes = _minutes_from_base(result.collected_at, item.get("published_at"))
         rows.append(
             {
                 "source": item.get("source"),
                 "headline": item.get("headline"),
+                "summary": item.get("summary") or "",
                 "published_at": _fmt_dt(item.get("published_at"), "UTC"),
+                "minutes_since_collected": age_minutes,
+                "url": item.get("url"),
             }
         )
     return rows
@@ -399,3 +429,338 @@ def _thinking_summary_en(result: PipelineResult) -> list[str]:
         f"Opposition: {oppose}",
         f"Invalidation: {invalidation}",
     ]
+
+
+def _thinking_summary_telegram_zh(result: PipelineResult) -> dict[str, Any]:
+    if result.final_forecast is None:
+        return {
+            "状态": "未发布",
+            "拒绝原因": result.rejection_reasons,
+            "过程摘要": result.reasoning_summary,
+        }
+
+    forecast = result.final_forecast
+    state = result.state_snapshot
+    confidence = result.confidence_snapshot
+    top_scenario = (state.get("scenarios") or [None])[0]
+    components = confidence.get("components", {})
+    penalties = confidence.get("penalties", {})
+
+    return {
+        "结论路径": [
+            f"输入层：收集新闻 {len(result.news_snapshot)} 条，市场指标 {len(result.market_snapshot)} 个。",
+            f"状态层：{state.get('regime_label', 'n/a')}。",
+            "审查层：已通过反后验审查与规则门禁。",
+        ],
+        "状态与情景": {
+            "增长/通胀/流动性/波动": (
+                f"{state.get('growth_state', 'n/a')} / "
+                f"{state.get('inflation_state', 'n/a')} / "
+                f"{state.get('liquidity_state', 'n/a')} / "
+                f"{state.get('volatility_state', 'n/a')}"
+            ),
+            "主情景": (
+                None
+                if not top_scenario
+                else {
+                    "名称": top_scenario.get("name"),
+                    "概率": _percent(float(top_scenario.get("probability", 0.0))),
+                    "方向含义": top_scenario.get("directional_implication"),
+                    "关键条件": top_scenario.get("key_conditions"),
+                }
+            ),
+            "跨资产信号": state.get("cross_asset_signals", []),
+        },
+        "置信度拆解": {
+            "最终置信度": _percent(forecast.confidence),
+            "贡献项": {
+                "场景一致性": components.get("scenario_alignment"),
+                "事件一致性": components.get("event_consensus"),
+                "跨资产确认": components.get("cross_asset_confirmation"),
+                "证据平衡": components.get("evidence_balance"),
+            },
+            "惩罚项": {
+                "新鲜度惩罚": penalties.get("freshness_penalty"),
+                "风险惩罚": penalties.get("risk_penalty"),
+            },
+        },
+        "支持与反证": {
+            "支持证据": forecast.supportive_evidence,
+            "反对证据": forecast.opposing_evidence,
+            "失效条件": forecast.invalidation_conditions,
+        },
+        "过程摘要": result.reasoning_summary,
+    }
+
+
+def _thinking_summary_telegram_en(result: PipelineResult) -> dict[str, Any]:
+    if result.final_forecast is None:
+        return {
+            "status": "rejected",
+            "rejection_reasons": result.rejection_reasons,
+            "trace": result.reasoning_summary,
+        }
+
+    forecast = result.final_forecast
+    state = result.state_snapshot
+    confidence = result.confidence_snapshot
+    top_scenario = (state.get("scenarios") or [None])[0]
+    components = confidence.get("components", {})
+    penalties = confidence.get("penalties", {})
+
+    return {
+        "reasoning_path": [
+            f"Input layer: {len(result.news_snapshot)} news items, {len(result.market_snapshot)} indicators.",
+            f"State layer: {state.get('regime_label', 'n/a')}.",
+            "Governance layer: anti-hindsight and rule gates passed.",
+        ],
+        "state_and_scenarios": {
+            "growth_inflation_liquidity_volatility": (
+                f"{state.get('growth_state', 'n/a')} / "
+                f"{state.get('inflation_state', 'n/a')} / "
+                f"{state.get('liquidity_state', 'n/a')} / "
+                f"{state.get('volatility_state', 'n/a')}"
+            ),
+            "top_scenario": (
+                None
+                if not top_scenario
+                else {
+                    "name": top_scenario.get("name"),
+                    "probability": _percent(float(top_scenario.get("probability", 0.0))),
+                    "directional_implication": top_scenario.get("directional_implication"),
+                    "key_conditions": top_scenario.get("key_conditions"),
+                }
+            ),
+            "cross_asset_signals": state.get("cross_asset_signals", []),
+        },
+        "confidence_breakdown": {
+            "final_confidence": _percent(forecast.confidence),
+            "components": {
+                "scenario_alignment": components.get("scenario_alignment"),
+                "event_consensus": components.get("event_consensus"),
+                "cross_asset_confirmation": components.get("cross_asset_confirmation"),
+                "evidence_balance": components.get("evidence_balance"),
+            },
+            "penalties": {
+                "freshness_penalty": penalties.get("freshness_penalty"),
+                "risk_penalty": penalties.get("risk_penalty"),
+            },
+        },
+        "support_vs_opposition": {
+            "supportive_evidence": forecast.supportive_evidence,
+            "opposing_evidence": forecast.opposing_evidence,
+            "invalidation_conditions": forecast.invalidation_conditions,
+        },
+        "trace": result.reasoning_summary,
+    }
+
+
+def _analysis_flow_summary(result: PipelineResult) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for step in result.analysis_flow:
+        if not isinstance(step, dict):
+            continue
+        rows.append(
+            {
+                "stage": step.get("stage"),
+                "status": step.get("status"),
+                "elapsed_seconds": step.get("elapsed_seconds"),
+                "output_summary": step.get("output_summary"),
+            }
+        )
+    return rows
+
+
+def _runtime_assertions_zh(result: PipelineResult) -> dict[str, Any]:
+    runtime_assertions = result.runtime_assertions or {}
+    checks = runtime_assertions.get("checks", [])
+    mapped_checks: list[dict[str, Any]] = []
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        mapped_checks.append(
+            {
+                "检查项": item.get("name"),
+                "通过": bool(item.get("passed")),
+                "期望": item.get("expected"),
+                "观测": item.get("observed"),
+            }
+        )
+    return {
+        "严格模式生效": bool(runtime_assertions.get("strict_mode_active")),
+        "全部通过": bool(runtime_assertions.get("all_passed")),
+        "LLM提供方": runtime_assertions.get("llm_provider"),
+        "新闻来源": runtime_assertions.get("news_source"),
+        "市场来源": runtime_assertions.get("market_source"),
+        "检查": mapped_checks,
+    }
+
+
+def _condition_structure_zh(result: PipelineResult) -> dict[str, Any]:
+    if result.final_forecast is None:
+        return {}
+    forecast = result.final_forecast
+    return {
+        "上行触发（满足项越多，越偏上行）": _condition_rows_zh(
+            result, forecast.upside_triggers, "满足后，上调上行概率；若连续出现可提高风险偏好。"
+        ),
+        "下行触发（满足项越多，越偏下行）": _condition_rows_zh(
+            result, forecast.downside_triggers, "满足后，上调下行概率；若连续出现需收敛风险暴露。"
+        ),
+        "失效条件（触发即降级/反转）": _condition_rows_zh(
+            result, forecast.invalidation_conditions, "触发后应降级当前观点，必要时切换方向。"
+        ),
+        "重点监控（建议市场60分钟、新闻72小时更新）": _monitor_rows_zh(result, forecast.monitoring_list),
+    }
+
+
+def _condition_structure_en(result: PipelineResult) -> dict[str, Any]:
+    if result.final_forecast is None:
+        return {}
+    forecast = result.final_forecast
+    return {
+        "upside_triggers": _condition_rows_en(
+            result,
+            forecast.upside_triggers,
+            "If sustained, increase upside probability and allow more risk-on positioning.",
+        ),
+        "downside_triggers": _condition_rows_en(
+            result,
+            forecast.downside_triggers,
+            "If sustained, increase downside probability and reduce risk exposure.",
+        ),
+        "invalidation_conditions": _condition_rows_en(
+            result,
+            forecast.invalidation_conditions,
+            "If triggered, downgrade confidence or flip directional view after review.",
+        ),
+        "monitoring_list": _monitor_rows_en(result, forecast.monitoring_list),
+    }
+
+
+def _condition_rows_zh(result: PipelineResult, items: list[str], action: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        related_symbols = _related_symbols(item)
+        rows.append(
+            {
+                "序号": index,
+                "条件": item,
+                "关联市场": related_symbols or ["多因子"],
+                "当前观测": _market_observations_zh(result, related_symbols),
+                "动作建议": action,
+            }
+        )
+    return rows
+
+
+def _condition_rows_en(result: PipelineResult, items: list[str], action: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        related_symbols = _related_symbols(item)
+        rows.append(
+            {
+                "index": index,
+                "condition": item,
+                "related_markets": related_symbols or ["multi-factor"],
+                "current_observation": _market_observations_en(result, related_symbols),
+                "action": action,
+            }
+        )
+    return rows
+
+
+def _monitor_rows_zh(result: PipelineResult, items: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        related_symbols = _related_symbols(item)
+        rows.append(
+            {
+                "序号": index,
+                "监控项": item,
+                "关联市场": related_symbols or ["多因子"],
+                "当前观测": _market_observations_zh(result, related_symbols),
+                "刷新建议": "市场<=60分钟；新闻<=72小时",
+            }
+        )
+    return rows
+
+
+def _monitor_rows_en(result: PipelineResult, items: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        related_symbols = _related_symbols(item)
+        rows.append(
+            {
+                "index": index,
+                "monitor": item,
+                "related_markets": related_symbols or ["multi-factor"],
+                "current_observation": _market_observations_en(result, related_symbols),
+                "refresh_hint": "market<=60m; news<=72h",
+            }
+        )
+    return rows
+
+
+def _related_symbols(text: str) -> list[str]:
+    normalized = text.lower()
+    mappings: dict[str, list[str]] = {
+        "SPY": ["spy", "标普", "s&p"],
+        "QQQ": ["qqq", "纳指", "tech"],
+        "IWM": ["iwm", "小盘", "russell"],
+        "VIX": ["vix", "波动率", "volatility"],
+        "US10Y": ["10y", "us10y", "利率", "收益率", "yield"],
+        "DXY": ["dxy", "美元", "dollar"],
+        "OIL": ["oil", "原油", "油价", "wti"],
+    }
+    matched: list[str] = []
+    for symbol, aliases in mappings.items():
+        if any(alias in normalized for alias in aliases):
+            matched.append(symbol)
+    return matched
+
+
+def _market_observations_zh(result: PipelineResult, symbols: list[str]) -> list[str]:
+    observations: list[str] = []
+    for symbol in symbols:
+        payload = result.market_snapshot.get(symbol)
+        if not payload:
+            continue
+        observations.append(
+            f"{symbol}: 值={payload.get('value')}，日变动={payload.get('change_pct')}%，时间={payload.get('as_of')}"
+        )
+    return observations if observations else ["暂无直接对应行情，按多因子综合判断"]
+
+
+def _market_observations_en(result: PipelineResult, symbols: list[str]) -> list[str]:
+    observations: list[str] = []
+    for symbol in symbols:
+        payload = result.market_snapshot.get(symbol)
+        if not payload:
+            continue
+        observations.append(
+            f"{symbol}: value={payload.get('value')}, change={payload.get('change_pct')}%, as_of={payload.get('as_of')}"
+        )
+    return observations if observations else ["No direct ticker match; use multi-factor context."]
+
+
+def _minutes_from_base(base_dt_str: str | None, event_dt_str: str | None) -> float | None:
+    base_dt = _parse_iso_datetime(base_dt_str)
+    event_dt = _parse_iso_datetime(event_dt_str)
+    if base_dt is None or event_dt is None:
+        return None
+    delta = base_dt - event_dt
+    return round(delta.total_seconds() / 60.0, 1)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed

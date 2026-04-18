@@ -51,10 +51,37 @@ class FormatterTests(unittest.TestCase):
                 {
                     "source": "stub-news",
                     "headline": "Macro signal mixed",
+                    "summary": "Liquidity and rates signals diverged overnight.",
+                    "url": "https://example.com/news/1",
                     "published_at": "2026-04-17T09:40:00+00:00",
                 }
             ],
             reasoning_summary=["状态映射: stable regime", "主情景: Base(60%), 方向=neutral"],
+            state_snapshot={
+                "regime_label": "stable regime",
+                "growth_state": "moderate",
+                "inflation_state": "sticky",
+                "liquidity_state": "neutral",
+                "volatility_state": "normal",
+                "cross_asset_signals": ["vix benign", "rates elevated"],
+                "scenarios": [
+                    {
+                        "name": "Base",
+                        "probability": 0.6,
+                        "directional_implication": "bullish",
+                        "key_conditions": ["vix stays low"],
+                    }
+                ],
+            },
+            confidence_snapshot={
+                "components": {
+                    "scenario_alignment": 0.7,
+                    "event_consensus": 0.6,
+                    "cross_asset_confirmation": 0.65,
+                    "evidence_balance": 0.8,
+                },
+                "penalties": {"freshness_penalty": 0.0, "risk_penalty": 0.03},
+            },
             artifact_paths={
                 "final_forecast": "/tmp/final.json",
                 "market_raw": "/tmp/market.json",
@@ -78,6 +105,9 @@ class FormatterTests(unittest.TestCase):
         self.assertIn("artifact_paths", payload)
         self.assertEqual(payload["publish_status"], "approved")
         self.assertIn("collected_at", payload)
+        self.assertIn("runtime_assertions", payload)
+        self.assertIn("analysis_flow", payload)
+        self.assertIn("publish_gate_report", payload)
 
     def test_telegram_zh_output_contains_expected_blocks(self) -> None:
         payload = format_cli_output(self._sample_result(), language="zh", style="telegram")
@@ -90,6 +120,8 @@ class FormatterTests(unittest.TestCase):
         self.assertIn("思维总结", payload)
         self.assertIn("判断摘要", payload)
         self.assertIn("文件路径", payload)
+        self.assertIn("上行触发（满足项越多，越偏上行）", payload["条件结构"])
+        self.assertIn("状态与情景", payload["思维总结"])
 
     def test_simple_zh_output_for_rejected_publish(self) -> None:
         rejected_result = PipelineResult(

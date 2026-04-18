@@ -107,11 +107,17 @@ Optional manual inputs:
 python -m app.main run --news-file ./data/mock/news_latest.json --market-file ./data/mock/market_latest.json
 ```
 
-Try live data first (fallbacks to mock if unavailable):
+Try live data first:
 
 ```bash
 python -m app.main run --live
 ```
+
+`STRICT_LIVE_MODE=true`（默认）时：
+- 不允许 `LLM_PROVIDER=mock`
+- live 采集失败且无 latest cache 时直接报错
+- 不会回退到 `data/mock/*`
+- 返回 `runtime_assertions`，可审计本次是否走了 mock/source fallback
 
 Override freshness windows for one run:
 
@@ -130,6 +136,33 @@ If you want strict rejection (disable latest-available fallback), set in `.env`:
 ```env
 ALLOW_LATEST_AVAILABLE_FALLBACK=false
 ```
+
+性能优化相关参数（适合真实 API）：
+
+```env
+COLLECT_IN_PARALLEL=true
+LLM_MAX_TOKENS=1200
+LLM_COMPACT_NEWS_ITEMS=8
+LLM_COMPACT_TEXT_CHARS=320
+LIVE_NEWS_PAGE_SIZE=12
+```
+
+说明：
+- `COLLECT_IN_PARALLEL=true`：新闻和市场并发采集
+- `LLM_COMPACT_*`：压缩传给模型的新闻上下文，降低延迟
+- CLI `telegram` 输出会显示每个 LLM 阶段耗时，便于定位瓶颈
+
+生产环境一键真实连通+回归验证（禁止 mock）：
+
+```bash
+bash scripts/prod_live_verify.sh
+```
+
+该脚本会执行：
+- MiniMax / NewsAPI / FMP 连通性检查
+- 1 次 `telegram` live smoke
+- 1 次 `full` live 回归
+- 严格断言 `runtime_assertions.all_passed=true`，且新闻/市场来源为 live
 
 ## Optional API
 
@@ -191,6 +224,7 @@ Each run writes separated artifacts:
 - approved: `artifacts/<run_id>/final/final_forecast.json`
 - rejected: `artifacts/<run_id>/final/review_rejected.json`
 - rejected by stale inputs: `artifacts/<run_id>/final/input_rejected.json`
+- both approved/rejected: `artifacts/<run_id>/final/analysis_trace.json`
 
 SQLite tables:
 - `runs`
@@ -249,6 +283,11 @@ If either fails:
 - `runs.status=REVIEW_REJECTED`
 - no row is written to `forecasts`
 - output is written to `review_rejected.json`
+- but analysis is still fully visible through:
+  - `analysis_flow`
+  - `analysis_variants` (draft/reviewed/repaired)
+  - `publish_gate_report`
+  - `analysis_trace.json`
 
 ## LLM Provider Switching
 

@@ -230,6 +230,7 @@ class OrchestratorFreshnessGateTests(unittest.TestCase):
         self.assertIsNone(result.final_forecast)
         self.assertIn("input_rejected", result.artifact_paths)
         self.assertIn("input_freshness_report", result.artifact_paths)
+        self.assertIn("analysis_trace", result.artifact_paths)
         self.assertEqual(llm_client.calls, [])
 
         with sqlite3.connect(self.db_path) as conn:
@@ -262,6 +263,7 @@ class OrchestratorFreshnessGateTests(unittest.TestCase):
         self.assertEqual(result.publish_status, "approved")
         self.assertIn("input_latest_available_fallback", result.artifact_paths)
         self.assertNotIn("input_rejected", result.artifact_paths)
+        self.assertIn("analysis_trace", result.artifact_paths)
         self.assertEqual(
             llm_client.calls,
             ["event_extraction", "state_and_forecast", "anti_hindsight_review"],

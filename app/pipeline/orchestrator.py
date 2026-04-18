@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Callable, Literal
 
 from app.collectors.market_data import collect_market_data
 from app.collectors.news import collect_news
 from app.config import Settings
+from app.exceptions import CollectorError
 from app.llm_client import BaseLLMClient, build_llm_client
 from app.pipeline.check_freshness import build_input_freshness_report
 from app.pipeline.confidence import compute_confidence
@@ -50,8 +53,14 @@ class PipelineResult:
     run_started_at: str | None = None
     run_completed_at: str | None = None
     market_snapshot: dict[str, dict[str, Any]] = field(default_factory=dict)
-    news_snapshot: list[dict[str, str]] = field(default_factory=list)
+    news_snapshot: list[dict[str, Any]] = field(default_factory=list)
     reasoning_summary: list[str] = field(default_factory=list)
+    state_snapshot: dict[str, Any] = field(default_factory=dict)
+    confidence_snapshot: dict[str, Any] = field(default_factory=dict)
+    runtime_assertions: dict[str, Any] = field(default_factory=dict)
+    analysis_flow: list[dict[str, Any]] = field(default_factory=list)
+    analysis_variants: dict[str, Any] = field(default_factory=dict)
+    publish_gate_report: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -67,6 +76,107 @@ class PipelineDependencies:
 
 def _rule_issues_to_reasons(rule_report: RuleCheckReport) -> list[str]:
     return [f"{item.code}: {item.message}" for item in rule_report.issues]
+
+
+def _build_runtime_assertions(
+    settings: Settings,
+    llm_provider: str,
+    news_source: str,
+    market_source: str,
+) -> dict[str, Any]:
+    strict_mode_active = bool(settings.use_live_data and settings.strict_live_mode)
+    allowed_news_sources = {"live", "latest_available_cache"}
+    allowed_market_sources = {"live_fmp", "live_fmp+yahoo", "latest_available_cache"}
+
+    checks = [
+        {
+            "name": "llm_provider_not_mock",
+            "passed": llm_provider != "mock",
+            "expected": "llm_provider != mock",
+            "observed": llm_provider,
+        },
+        {
+            "name": "news_source_allowed",
+            "passed": news_source in allowed_news_sources,
+            "expected": sorted(allowed_news_sources),
+            "observed": news_source,
+        },
+        {
+            "name": "market_source_allowed",
+            "passed": market_source in allowed_market_sources,
+            "expected": sorted(allowed_market_sources),
+            "observed": market_source,
+        },
+        {
+            "name": "news_source_not_mock",
+            "passed": news_source != "mock",
+            "expected": "news_source != mock",
+            "observed": news_source,
+        },
+        {
+            "name": "market_source_not_mock",
+            "passed": market_source != "mock",
+            "expected": "market_source != mock",
+            "observed": market_source,
+        },
+    ]
+
+    return {
+        "strict_mode_active": strict_mode_active,
+        "llm_provider": llm_provider,
+        "news_source": news_source,
+        "market_source": market_source,
+        "checks": checks,
+        "all_passed": all(item["passed"] for item in checks),
+    }
+
+
+def _assert_runtime_assertions(runtime_assertions: dict[str, Any]) -> None:
+    strict_mode_active = bool(runtime_assertions.get("strict_mode_active"))
+    if not strict_mode_active:
+        return
+
+    failed_checks = [
+        item
+        for item in runtime_assertions.get("checks", [])
+        if isinstance(item, dict) and not bool(item.get("passed"))
+    ]
+    if not failed_checks:
+        return
+
+    details = ", ".join(
+        f"{item.get('name')} observed={item.get('observed')}"
+        for item in failed_checks
+    )
+    raise CollectorError(f"Strict live runtime assertions failed: {details}")
+
+
+def _flow_entry(
+    *,
+    stage: str,
+    status: str,
+    elapsed_seconds: float,
+    input_summary: dict[str, Any] | None = None,
+    output_summary: dict[str, Any] | None = None,
+    artifacts: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "status": status,
+        "elapsed_seconds": round(float(elapsed_seconds), 3),
+        "input_summary": input_summary or {},
+        "output_summary": output_summary or {},
+        "artifacts": artifacts or [],
+    }
+
+
+def _gate_check(name: str, passed: bool, detail: str, blocking: bool = True) -> dict[str, Any]:
+    return {
+        "name": name,
+        "passed": passed,
+        "blocking": blocking,
+        "detail": detail,
+    }
 
 
 def _can_use_latest_available_fallback(
@@ -129,16 +239,88 @@ def _build_market_snapshot(
     return snapshot
 
 
-def _build_news_snapshot(normalized_inputs: NormalizedInputs, top_k: int = 5) -> list[dict[str, str]]:
+def _build_news_snapshot(normalized_inputs: NormalizedInputs, top_k: int = 8) -> list[dict[str, Any]]:
     ranked_news = sorted(normalized_inputs.news, key=lambda item: item.published_at, reverse=True)[:top_k]
     return [
         {
             "source": item.source,
             "headline": item.headline,
+            "summary": item.summary,
+            "url": item.url,
             "published_at": item.published_at.isoformat(),
         }
         for item in ranked_news
     ]
+
+
+def _build_state_snapshot(state_mapping: StateMappingResult) -> dict[str, Any]:
+    scenarios = sorted(state_mapping.scenarios, key=lambda item: float(item.probability), reverse=True)
+    return {
+        "regime_label": state_mapping.regime_label,
+        "growth_state": state_mapping.growth_state,
+        "inflation_state": state_mapping.inflation_state,
+        "liquidity_state": state_mapping.liquidity_state,
+        "volatility_state": state_mapping.volatility_state,
+        "cross_asset_signals": state_mapping.cross_asset_signals,
+        "scenarios": [
+            {
+                "name": item.name,
+                "probability": item.probability,
+                "directional_implication": item.directional_implication.value,
+                "key_conditions": item.key_conditions,
+            }
+            for item in scenarios
+        ],
+        "narrative": state_mapping.narrative,
+    }
+
+
+def _truncate_text(value: str, max_chars: int) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}..."
+
+
+def _build_llm_normalized_inputs_payload(
+    normalized_inputs: NormalizedInputs,
+    max_news_items: int,
+    max_text_chars: int,
+) -> dict[str, Any]:
+    ranked_news = sorted(normalized_inputs.news, key=lambda item: item.published_at, reverse=True)
+    compact_news: list[dict[str, Any]] = []
+    for item in ranked_news[: max(1, max_news_items)]:
+        compact_news.append(
+            {
+                "source": item.source,
+                "headline": _truncate_text(item.headline, max_text_chars),
+                "summary": _truncate_text(item.summary, max_text_chars),
+                "url": item.url,
+                "published_at": item.published_at.isoformat(),
+            }
+        )
+
+    compact_indicators = [
+        {
+            "symbol": item.symbol,
+            "name": item.name,
+            "value": item.value,
+            "change_pct": item.change_pct,
+            "unit": item.unit,
+            "as_of": item.as_of.isoformat(),
+        }
+        for item in normalized_inputs.indicators
+    ]
+
+    return {
+        "run_id": normalized_inputs.run_id,
+        "collected_at": normalized_inputs.collected_at.isoformat(),
+        "forecast_horizon": normalized_inputs.forecast_horizon,
+        "market_universe": normalized_inputs.market_universe,
+        "news": compact_news,
+        "indicators": compact_indicators,
+        "state_variables": normalized_inputs.state_variables,
+    }
 
 
 def _event_direction_counts(structured_events_payload: dict[str, Any]) -> dict[str, int]:
@@ -229,14 +411,83 @@ def run_pipeline(
     reviewed_at: str | None = None
     latest_news_at: str | None = None
     latest_market_at: str | None = None
+    news_source: str | None = None
+    market_source: str | None = None
     latest_available_fallback_applied = False
     market_snapshot: dict[str, dict[str, Any]] = {}
-    news_snapshot: list[dict[str, str]] = []
+    news_snapshot: list[dict[str, Any]] = []
     reasoning_summary: list[str] = []
+    state_snapshot: dict[str, Any] = {}
+    confidence_snapshot: dict[str, Any] = {}
+    llm_normalized_inputs_payload: dict[str, Any] = {}
+    runtime_assertions: dict[str, Any] = {}
+    analysis_flow: list[dict[str, Any]] = []
+    analysis_variants: dict[str, Any] = {}
+    publish_gate_report: dict[str, Any] = {
+        "approved": False,
+        "checks": [],
+        "rejection_reasons": [],
+    }
+    pipeline_started = perf_counter()
+
+    def _finalize_run_timestamp() -> str:
+        reasoning_summary.append(f"总耗时: {perf_counter() - pipeline_started:.2f}s")
+        return datetime.now(timezone.utc).isoformat()
+
+    def _persist_analysis_trace(
+        *,
+        publish_status: Literal["approved", "rejected"],
+        rejection_reasons: list[str],
+        run_completed_at: str,
+    ) -> None:
+        trace_payload = {
+            "run_id": run_id,
+            "publish_status": publish_status,
+            "rejection_reasons": rejection_reasons,
+            "run_started_at": run_started_at_dt.isoformat(),
+            "run_completed_at": run_completed_at,
+            "runtime_assertions": runtime_assertions,
+            "analysis_flow": analysis_flow,
+            "analysis_variants": analysis_variants,
+            "publish_gate_report": publish_gate_report,
+            "market_snapshot": market_snapshot,
+            "news_snapshot": news_snapshot,
+            "state_snapshot": state_snapshot,
+            "confidence_snapshot": confidence_snapshot,
+            "reasoning_summary": reasoning_summary,
+            "artifact_paths": dict(artifact_paths),
+        }
+        artifact_paths["analysis_trace"] = str(
+            storage.save_artifact(
+                run_id,
+                stage="final",
+                artifact_name="analysis_trace.json",
+                payload=trace_payload,
+            )
+        )
 
     try:
-        raw_news_items, news_source = deps.news_collector(settings, news_file)
-        raw_market_indicators, market_source = deps.market_data_collector(settings, market_file)
+        collect_started = perf_counter()
+        if settings.collect_in_parallel:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                news_future = executor.submit(deps.news_collector, settings, news_file)
+                market_future = executor.submit(deps.market_data_collector, settings, market_file)
+                raw_news_items, news_source = news_future.result()
+                raw_market_indicators, market_source = market_future.result()
+        else:
+            raw_news_items, news_source = deps.news_collector(settings, news_file)
+            raw_market_indicators, market_source = deps.market_data_collector(settings, market_file)
+        collect_elapsed = perf_counter() - collect_started
+        reasoning_summary.append(
+            f"采集耗时: {collect_elapsed:.2f}s (news={news_source}, market={market_source})"
+        )
+        runtime_assertions = _build_runtime_assertions(
+            settings=settings,
+            llm_provider=settings.llm_provider,
+            news_source=news_source,
+            market_source=market_source,
+        )
+        _assert_runtime_assertions(runtime_assertions)
 
         artifact_paths["news_raw"] = str(
             storage.save_artifact(
@@ -254,7 +505,27 @@ def run_pipeline(
                 payload={"source": market_source, "items": raw_market_indicators},
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="collect_inputs",
+                status="ok",
+                elapsed_seconds=collect_elapsed,
+                input_summary={
+                    "use_live_data": settings.use_live_data,
+                    "strict_live_mode": settings.strict_live_mode,
+                    "collect_in_parallel": settings.collect_in_parallel,
+                },
+                output_summary={
+                    "news_source": news_source,
+                    "market_source": market_source,
+                    "news_count": len(raw_news_items),
+                    "market_count": len(raw_market_indicators),
+                },
+                artifacts=["news_raw", "market_raw"],
+            )
+        )
 
+        normalize_started = perf_counter()
         normalized_inputs = normalize_inputs(
             run_id=run_id,
             forecast_horizon=horizon,
@@ -270,6 +541,20 @@ def run_pipeline(
                 payload=normalized_inputs.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="normalize_inputs",
+                status="ok",
+                elapsed_seconds=perf_counter() - normalize_started,
+                output_summary={
+                    "forecast_horizon": normalized_inputs.forecast_horizon,
+                    "market_universe_count": len(normalized_inputs.market_universe),
+                    "news_items": len(normalized_inputs.news),
+                    "market_indicators": len(normalized_inputs.indicators),
+                },
+                artifacts=["normalized_inputs"],
+            )
+        )
         collected_at = normalized_inputs.collected_at.isoformat()
         latest_news_item = max((item.published_at for item in normalized_inputs.news), default=None)
         latest_market_item = max((item.as_of for item in normalized_inputs.indicators), default=None)
@@ -280,7 +565,19 @@ def run_pipeline(
         reasoning_summary.append(
             f"输入概览: 新闻{len(normalized_inputs.news)}条, 市场指标{len(normalized_inputs.indicators)}个"
         )
+        llm_normalized_inputs_payload = _build_llm_normalized_inputs_payload(
+            normalized_inputs=normalized_inputs,
+            max_news_items=settings.llm_compact_news_items,
+            max_text_chars=settings.llm_compact_text_chars,
+        )
+        reasoning_summary.append(
+            "LLM输入瘦身: "
+            f"news={len(llm_normalized_inputs_payload.get('news', []))}条, "
+            f"text_chars={settings.llm_compact_text_chars}, "
+            f"max_tokens={settings.llm_max_tokens}"
+        )
 
+        freshness_started = perf_counter()
         freshness_report = build_input_freshness_report(
             normalized_inputs=normalized_inputs,
             max_news_age_hours=news_age_limit,
@@ -292,6 +589,25 @@ def run_pipeline(
                 stage="intermediate",
                 artifact_name="input_freshness_report.json",
                 payload=freshness_report.model_dump(mode="json"),
+            )
+        )
+        analysis_flow.append(
+            _flow_entry(
+                stage="input_freshness_gate",
+                status="ok" if not freshness_report.has_blocking_issues else "blocking",
+                elapsed_seconds=perf_counter() - freshness_started,
+                input_summary={
+                    "max_news_age_hours": news_age_limit,
+                    "max_market_age_minutes": market_age_limit,
+                    "freshness_gate_enabled": freshness_gate_enabled,
+                    "allow_latest_available_fallback": allow_latest_available_fallback,
+                },
+                output_summary={
+                    "has_blocking_issues": freshness_report.has_blocking_issues,
+                    "stale_news_count": len(freshness_report.stale_news),
+                    "stale_market_count": len(freshness_report.stale_market),
+                },
+                artifacts=["input_freshness_report"],
             )
         )
         if freshness_gate_enabled and freshness_report.has_blocking_issues:
@@ -317,6 +633,18 @@ def run_pipeline(
                             },
                         )
                     )
+                    analysis_flow.append(
+                        _flow_entry(
+                            stage="latest_available_fallback",
+                            status="ok",
+                            elapsed_seconds=0.0,
+                            output_summary={
+                                "applied": True,
+                                "reason": "Freshness gate exceeded but latest-available fallback allowed",
+                            },
+                            artifacts=["input_latest_available_fallback"],
+                        )
+                    )
                 else:
                     rejection_reasons: list[str] = [freshness_report.summary, *fallback_reasons]
                     rejection_reasons.extend(
@@ -329,6 +657,22 @@ def run_pipeline(
                         f"limit={item.threshold_minutes:.1f}m"
                         for item in freshness_report.stale_market[:5]
                     )
+                    publish_gate_report = {
+                        "approved": False,
+                        "checks": [
+                            _gate_check(
+                                name="input_freshness_gate",
+                                passed=False,
+                                detail=freshness_report.summary,
+                            ),
+                            _gate_check(
+                                name="latest_available_fallback_allowed",
+                                passed=False,
+                                detail="; ".join(fallback_reasons) or "fallback denied",
+                            ),
+                        ],
+                        "rejection_reasons": rejection_reasons,
+                    }
                     artifact_paths["input_rejected"] = str(
                         storage.save_artifact(
                             run_id,
@@ -340,8 +684,28 @@ def run_pipeline(
                                 "freshness_gate_enabled": freshness_gate_enabled,
                                 "allow_latest_available_fallback": allow_latest_available_fallback,
                                 "input_freshness_report": freshness_report.model_dump(mode="json"),
+                                "runtime_assertions": runtime_assertions,
+                                "publish_gate_report": publish_gate_report,
                             },
                         )
+                    )
+                    analysis_flow.append(
+                        _flow_entry(
+                            stage="publish_gate",
+                            status="rejected",
+                            elapsed_seconds=0.0,
+                            output_summary={
+                                "reason_count": len(rejection_reasons),
+                                "gate": "input_freshness_gate",
+                            },
+                            artifacts=["input_rejected"],
+                        )
+                    )
+                    run_completed_at = _finalize_run_timestamp()
+                    _persist_analysis_trace(
+                        publish_status="rejected",
+                        rejection_reasons=rejection_reasons,
+                        run_completed_at=run_completed_at,
                     )
                     storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
                     return PipelineResult(
@@ -355,10 +719,16 @@ def run_pipeline(
                         latest_news_at=latest_news_at,
                         latest_market_at=latest_market_at,
                         run_started_at=run_started_at_dt.isoformat(),
-                        run_completed_at=datetime.now(timezone.utc).isoformat(),
+                        run_completed_at=run_completed_at,
                         market_snapshot=market_snapshot,
                         news_snapshot=news_snapshot,
                         reasoning_summary=reasoning_summary,
+                        state_snapshot=state_snapshot,
+                        confidence_snapshot=confidence_snapshot,
+                        runtime_assertions=runtime_assertions,
+                        analysis_flow=analysis_flow,
+                        analysis_variants=analysis_variants,
+                        publish_gate_report=publish_gate_report,
                     )
             else:
                 rejection_reasons = [freshness_report.summary]
@@ -372,6 +742,22 @@ def run_pipeline(
                     f"limit={item.threshold_minutes:.1f}m"
                     for item in freshness_report.stale_market[:5]
                 )
+                publish_gate_report = {
+                    "approved": False,
+                    "checks": [
+                        _gate_check(
+                            name="input_freshness_gate",
+                            passed=False,
+                            detail=freshness_report.summary,
+                        ),
+                        _gate_check(
+                            name="latest_available_fallback_enabled",
+                            passed=False,
+                            detail="Fallback disabled by configuration",
+                        ),
+                    ],
+                    "rejection_reasons": rejection_reasons,
+                }
                 artifact_paths["input_rejected"] = str(
                     storage.save_artifact(
                         run_id,
@@ -383,8 +769,28 @@ def run_pipeline(
                             "freshness_gate_enabled": freshness_gate_enabled,
                             "allow_latest_available_fallback": allow_latest_available_fallback,
                             "input_freshness_report": freshness_report.model_dump(mode="json"),
+                            "runtime_assertions": runtime_assertions,
+                            "publish_gate_report": publish_gate_report,
                         },
                     )
+                )
+                analysis_flow.append(
+                    _flow_entry(
+                        stage="publish_gate",
+                        status="rejected",
+                        elapsed_seconds=0.0,
+                        output_summary={
+                            "reason_count": len(rejection_reasons),
+                            "gate": "input_freshness_gate",
+                        },
+                        artifacts=["input_rejected"],
+                    )
+                )
+                run_completed_at = _finalize_run_timestamp()
+                _persist_analysis_trace(
+                    publish_status="rejected",
+                    rejection_reasons=rejection_reasons,
+                    run_completed_at=run_completed_at,
                 )
                 storage.complete_run(run_id, status="INPUT_STALE_REJECTED")
                 return PipelineResult(
@@ -398,18 +804,28 @@ def run_pipeline(
                     latest_news_at=latest_news_at,
                     latest_market_at=latest_market_at,
                     run_started_at=run_started_at_dt.isoformat(),
-                    run_completed_at=datetime.now(timezone.utc).isoformat(),
+                    run_completed_at=run_completed_at,
                     market_snapshot=market_snapshot,
                     news_snapshot=news_snapshot,
                     reasoning_summary=reasoning_summary,
+                    state_snapshot=state_snapshot,
+                    confidence_snapshot=confidence_snapshot,
+                    runtime_assertions=runtime_assertions,
+                    analysis_flow=analysis_flow,
+                    analysis_variants=analysis_variants,
+                    publish_gate_report=publish_gate_report,
                 )
 
         event_extraction_prompt = prompt_loader.load("event_extraction.txt")
+        event_started = perf_counter()
         structured_events = run_event_extraction(
             llm_client=llm_client,
             prompt_template=event_extraction_prompt,
             normalized_inputs=normalized_inputs,
+            normalized_inputs_payload=llm_normalized_inputs_payload,
         )
+        event_elapsed = perf_counter() - event_started
+        reasoning_summary.append(f"LLM阶段耗时 event_extraction={event_elapsed:.2f}s")
         artifact_paths["structured_events"] = str(
             storage.save_artifact(
                 run_id,
@@ -418,18 +834,35 @@ def run_pipeline(
                 payload=structured_events.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="event_extraction",
+                status="ok",
+                elapsed_seconds=event_elapsed,
+                output_summary={
+                    "event_count": len(structured_events.events),
+                    "summary": structured_events.summary,
+                },
+                artifacts=["structured_events"],
+            )
+        )
 
         # Call 2: combined state mapping + forecast draft.
         state_forecast_prompt = prompt_loader.load("state_mapping.txt")
+        state_started = perf_counter()
         state_and_forecast = run_state_and_forecast(
             llm_client=llm_client,
             prompt_template=state_forecast_prompt,
             normalized_inputs=normalized_inputs,
             structured_events=structured_events,
             output_language=settings.output_language,
+            normalized_inputs_payload=llm_normalized_inputs_payload,
         )
+        state_elapsed = perf_counter() - state_started
+        reasoning_summary.append(f"LLM阶段耗时 state_and_forecast={state_elapsed:.2f}s")
         state_mapping = state_and_forecast.state_mapping
         forecast_draft = state_and_forecast.forecast_draft
+        state_snapshot = _build_state_snapshot(state_mapping)
 
         artifact_paths["state_mapping"] = str(
             storage.save_artifact(
@@ -447,6 +880,19 @@ def run_pipeline(
                 payload=forecast_draft.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="state_and_forecast",
+                status="ok",
+                elapsed_seconds=state_elapsed,
+                output_summary={
+                    "regime_label": state_mapping.regime_label,
+                    "scenario_count": len(state_mapping.scenarios),
+                    "draft_directional_bias": forecast_draft.directional_bias.value,
+                },
+                artifacts=["state_mapping", "forecast_draft"],
+            )
+        )
 
         draft_rule_report = build_rule_report(forecast_draft)
         artifact_paths["draft_rule_report"] = str(
@@ -457,9 +903,22 @@ def run_pipeline(
                 payload=draft_rule_report.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="draft_rule_check",
+                status="ok" if not draft_rule_report.has_blocking_issues else "blocking",
+                elapsed_seconds=0.0,
+                output_summary={
+                    "blocking_issue_count": len(draft_rule_report.issues),
+                    "warning_count": len(draft_rule_report.warnings),
+                },
+                artifacts=["draft_rule_report"],
+            )
+        )
 
         # Call 3: anti-hindsight review (consumes rule report).
         review_prompt = prompt_loader.load("anti_hindsight_review.txt")
+        review_started = perf_counter()
         review_result = run_anti_hindsight_review(
             llm_client=llm_client,
             prompt_template=review_prompt,
@@ -468,7 +927,10 @@ def run_pipeline(
             forecast_draft=forecast_draft,
             draft_rule_report=draft_rule_report,
             output_language=settings.output_language,
+            normalized_inputs_payload=llm_normalized_inputs_payload,
         )
+        review_elapsed = perf_counter() - review_started
+        reasoning_summary.append(f"LLM阶段耗时 anti_hindsight_review={review_elapsed:.2f}s")
         reviewed_at = review_result.reviewed_at.isoformat()
         artifact_paths["anti_hindsight_review"] = str(
             storage.save_artifact(
@@ -478,14 +940,45 @@ def run_pipeline(
                 payload=review_result.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="anti_hindsight_review",
+                status=(
+                    "ok"
+                    if review_result.anti_hindsight_status == AntiHindsightStatus.PASS
+                    else "blocking"
+                ),
+                elapsed_seconds=review_elapsed,
+                output_summary={
+                    "anti_hindsight_status": review_result.anti_hindsight_status.value,
+                    "issue_count": len(review_result.issues),
+                },
+                artifacts=["anti_hindsight_review"],
+            )
+        )
 
-        post_review_rule_report = build_rule_report(review_result.reviewed_forecast)
+        post_review_rule_report = build_rule_report(
+            review_result.reviewed_forecast,
+            require_review_status=True,
+        )
         artifact_paths["post_review_rule_report"] = str(
             storage.save_artifact(
                 run_id,
                 stage="intermediate",
                 artifact_name="post_review_rule_report.json",
                 payload=post_review_rule_report.model_dump(mode="json"),
+            )
+        )
+        analysis_flow.append(
+            _flow_entry(
+                stage="post_review_rule_check",
+                status="ok" if not post_review_rule_report.has_blocking_issues else "blocking",
+                elapsed_seconds=0.0,
+                output_summary={
+                    "blocking_issue_count": len(post_review_rule_report.issues),
+                    "warning_count": len(post_review_rule_report.warnings),
+                },
+                artifacts=["post_review_rule_report"],
             )
         )
 
@@ -503,11 +996,12 @@ def run_pipeline(
             latest_available_fallback_applied=latest_available_fallback_applied,
         )
         repaired_payload["confidence"] = confidence_result.confidence
+        confidence_snapshot = confidence_result.breakdown.model_dump(mode="json")
         _append_state_reasoning_summary(
             reasoning_summary=reasoning_summary,
             state_mapping=state_mapping,
             structured_events_payload=structured_events.model_dump(mode="json"),
-            confidence_breakdown_payload=confidence_result.breakdown.model_dump(mode="json"),
+            confidence_breakdown_payload=confidence_snapshot,
         )
         artifact_paths["confidence_breakdown"] = str(
             storage.save_artifact(
@@ -518,7 +1012,10 @@ def run_pipeline(
             )
         )
 
-        post_repair_rule_report = build_rule_report(repaired_payload)
+        post_repair_rule_report = build_rule_report(
+            repaired_payload,
+            require_review_status=True,
+        )
         artifact_paths["post_repair_rule_report"] = str(
             storage.save_artifact(
                 run_id,
@@ -527,20 +1024,91 @@ def run_pipeline(
                 payload=post_repair_rule_report.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="post_repair_rule_check",
+                status="ok" if not post_repair_rule_report.has_blocking_issues else "blocking",
+                elapsed_seconds=0.0,
+                output_summary={
+                    "blocking_issue_count": len(post_repair_rule_report.issues),
+                    "warning_count": len(post_repair_rule_report.warnings),
+                },
+                artifacts=["confidence_breakdown", "post_repair_rule_report"],
+            )
+        )
 
         final_forecast = FinalForecast.model_validate(repaired_payload)
+        analysis_variants = {
+            "draft_forecast": forecast_draft.model_dump(mode="json"),
+            "reviewed_forecast": review_result.reviewed_forecast.model_dump(mode="json"),
+            "repaired_forecast": repaired_payload,
+        }
 
         rejection_reasons: list[str] = []
+        publish_gate_checks: list[dict[str, Any]] = []
         if review_result.anti_hindsight_status != AntiHindsightStatus.PASS:
             rejection_reasons.append("ANTI_HINDSIGHT_FAIL: review status is FAIL")
             rejection_reasons.extend(review_result.issues)
             reasoning_summary.append("反后验审查未通过，进入发布拒绝流程")
+            publish_gate_checks.append(
+                _gate_check(
+                    name="top_level_anti_hindsight_status_pass",
+                    passed=False,
+                    detail=f"anti_hindsight_status={review_result.anti_hindsight_status.value}",
+                )
+            )
+        else:
+            publish_gate_checks.append(
+                _gate_check(
+                    name="top_level_anti_hindsight_status_pass",
+                    passed=True,
+                    detail=f"anti_hindsight_status={review_result.anti_hindsight_status.value}",
+                )
+            )
+
+        if final_forecast.anti_hindsight_status != AntiHindsightStatus.PASS:
+            rejection_reasons.append("ANTI_HINDSIGHT_FAIL: reviewed forecast status is FAIL")
+            publish_gate_checks.append(
+                _gate_check(
+                    name="reviewed_forecast_status_pass",
+                    passed=False,
+                    detail=f"anti_hindsight_status={final_forecast.anti_hindsight_status.value}",
+                )
+            )
+        else:
+            publish_gate_checks.append(
+                _gate_check(
+                    name="reviewed_forecast_status_pass",
+                    passed=True,
+                    detail=f"anti_hindsight_status={final_forecast.anti_hindsight_status.value}",
+                )
+            )
 
         if post_repair_rule_report.has_blocking_issues:
             rejection_reasons.extend(_rule_issues_to_reasons(post_repair_rule_report))
             reasoning_summary.append("规则引擎在修复后仍发现阻断项，发布拒绝")
+            publish_gate_checks.append(
+                _gate_check(
+                    name="post_repair_rule_check",
+                    passed=False,
+                    detail=f"blocking_issues={len(post_repair_rule_report.issues)}",
+                )
+            )
+        else:
+            publish_gate_checks.append(
+                _gate_check(
+                    name="post_repair_rule_check",
+                    passed=True,
+                    detail="No blocking rule issues after deterministic repair",
+                )
+            )
 
         if rejection_reasons:
+            publish_gate_report = {
+                "approved": False,
+                "checks": publish_gate_checks,
+                "rejection_reasons": rejection_reasons,
+            }
             artifact_paths["review_rejected"] = str(
                 storage.save_artifact(
                     run_id,
@@ -556,8 +1124,30 @@ def run_pipeline(
                         "post_repair_rule_report": post_repair_rule_report.model_dump(mode="json"),
                         "reviewed_forecast": review_result.reviewed_forecast.model_dump(mode="json"),
                         "auto_repaired_forecast": repaired_payload,
+                        "runtime_assertions": runtime_assertions,
+                        "analysis_flow": analysis_flow,
+                        "analysis_variants": analysis_variants,
+                        "publish_gate_report": publish_gate_report,
                     },
                 )
+            )
+            analysis_flow.append(
+                _flow_entry(
+                    stage="publish_gate",
+                    status="rejected",
+                    elapsed_seconds=0.0,
+                    output_summary={
+                        "reason_count": len(rejection_reasons),
+                        "anti_hindsight_status": review_result.anti_hindsight_status.value,
+                    },
+                    artifacts=["review_rejected"],
+                )
+            )
+            run_completed_at = _finalize_run_timestamp()
+            _persist_analysis_trace(
+                publish_status="rejected",
+                rejection_reasons=rejection_reasons,
+                run_completed_at=run_completed_at,
             )
             storage.complete_run(run_id, status="REVIEW_REJECTED")
             return PipelineResult(
@@ -571,13 +1161,31 @@ def run_pipeline(
                 latest_news_at=latest_news_at,
                 latest_market_at=latest_market_at,
                 run_started_at=run_started_at_dt.isoformat(),
-                run_completed_at=datetime.now(timezone.utc).isoformat(),
+                run_completed_at=run_completed_at,
                 market_snapshot=market_snapshot,
                 news_snapshot=news_snapshot,
                 reasoning_summary=reasoning_summary,
+                state_snapshot=state_snapshot,
+                confidence_snapshot=confidence_snapshot,
+                runtime_assertions=runtime_assertions,
+                analysis_flow=analysis_flow,
+                analysis_variants=analysis_variants,
+                publish_gate_report=publish_gate_report,
             )
 
-        validate_forecast_rules(final_forecast)
+        validate_forecast_rules(final_forecast, require_review_status=True)
+        publish_gate_checks.append(
+            _gate_check(
+                name="final_schema_validation",
+                passed=True,
+                detail="validate_forecast_rules passed on final forecast",
+            )
+        )
+        publish_gate_report = {
+            "approved": True,
+            "checks": publish_gate_checks,
+            "rejection_reasons": [],
+        }
         reasoning_summary.append("审查与规则门禁全部通过，发布最终预测")
         artifact_paths["final_forecast"] = str(
             storage.save_artifact(
@@ -587,8 +1195,27 @@ def run_pipeline(
                 payload=final_forecast.model_dump(mode="json"),
             )
         )
+        analysis_flow.append(
+            _flow_entry(
+                stage="publish_gate",
+                status="approved",
+                elapsed_seconds=0.0,
+                output_summary={
+                    "anti_hindsight_status": final_forecast.anti_hindsight_status.value,
+                    "directional_bias": final_forecast.directional_bias.value,
+                    "confidence": final_forecast.confidence,
+                },
+                artifacts=["final_forecast"],
+            )
+        )
 
         storage.save_forecast(run_id, final_forecast)
+        run_completed_at = _finalize_run_timestamp()
+        _persist_analysis_trace(
+            publish_status="approved",
+            rejection_reasons=[],
+            run_completed_at=run_completed_at,
+        )
         storage.complete_run(run_id, status="SUCCEEDED")
         return PipelineResult(
             run_id=run_id,
@@ -601,10 +1228,16 @@ def run_pipeline(
             latest_news_at=latest_news_at,
             latest_market_at=latest_market_at,
             run_started_at=run_started_at_dt.isoformat(),
-            run_completed_at=datetime.now(timezone.utc).isoformat(),
+            run_completed_at=run_completed_at,
             market_snapshot=market_snapshot,
             news_snapshot=news_snapshot,
             reasoning_summary=reasoning_summary,
+            state_snapshot=state_snapshot,
+            confidence_snapshot=confidence_snapshot,
+            runtime_assertions=runtime_assertions,
+            analysis_flow=analysis_flow,
+            analysis_variants=analysis_variants,
+            publish_gate_report=publish_gate_report,
         )
 
     except Exception as exc:

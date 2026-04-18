@@ -267,12 +267,22 @@ class OrchestratorReviewGateTests(unittest.TestCase):
         self.assertEqual(result.publish_status, "rejected")
         self.assertIsNone(result.final_forecast)
         self.assertIn("review_rejected", result.artifact_paths)
+        self.assertIn("analysis_trace", result.artifact_paths)
         self.assertNotIn("final_forecast", result.artifact_paths)
 
         review_rejected_path = Path(result.artifact_paths["review_rejected"])
         self.assertTrue(review_rejected_path.exists())
         payload = json.loads(review_rejected_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["publish_status"], "rejected")
+        self.assertIn("analysis_variants", payload)
+        self.assertIn("publish_gate_report", payload)
+
+        analysis_trace_path = Path(result.artifact_paths["analysis_trace"])
+        self.assertTrue(analysis_trace_path.exists())
+        analysis_trace = json.loads(analysis_trace_path.read_text(encoding="utf-8"))
+        self.assertEqual(analysis_trace["publish_status"], "rejected")
+        self.assertIn("analysis_flow", analysis_trace)
+        self.assertIn("runtime_assertions", analysis_trace)
 
         with sqlite3.connect(self.db_path) as conn:
             forecast_count = conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
@@ -291,6 +301,7 @@ class OrchestratorReviewGateTests(unittest.TestCase):
         self.assertEqual(result.publish_status, "approved")
         self.assertIsNotNone(result.final_forecast)
         self.assertIn("final_forecast", result.artifact_paths)
+        self.assertIn("analysis_trace", result.artifact_paths)
 
         with sqlite3.connect(self.db_path) as conn:
             forecast_count = conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
@@ -301,6 +312,13 @@ class OrchestratorReviewGateTests(unittest.TestCase):
 
         self.assertEqual(forecast_count, 1)
         self.assertEqual(run_status, "SUCCEEDED")
+
+        analysis_trace_path = Path(result.artifact_paths["analysis_trace"])
+        self.assertTrue(analysis_trace_path.exists())
+        analysis_trace = json.loads(analysis_trace_path.read_text(encoding="utf-8"))
+        self.assertEqual(analysis_trace["publish_status"], "approved")
+        self.assertIn("publish_gate_report", analysis_trace)
+        self.assertTrue(analysis_trace["publish_gate_report"]["approved"])
 
     def test_chinese_mode_keeps_review_summary_and_final_thesis_in_chinese(self) -> None:
         llm_client = CountingLLMClient(review_status=AntiHindsightStatus.PASS)

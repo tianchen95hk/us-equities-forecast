@@ -13,9 +13,16 @@ def run_event_extraction(
     llm_client: BaseLLMClient,
     prompt_template: str,
     normalized_inputs: NormalizedInputs,
+    normalized_inputs_payload: dict[str, object] | None = None,
 ) -> EventExtractionResult:
     """Execute the event extraction stage."""
-    payload = {"normalized_inputs": normalized_inputs.model_dump(mode="json")}
+    payload = {
+        "normalized_inputs": (
+            normalized_inputs_payload
+            if normalized_inputs_payload is not None
+            else normalized_inputs.model_dump(mode="json")
+        )
+    }
     max_attempts = 3
 
     last_exc: Exception | None = None

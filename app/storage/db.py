@@ -13,7 +13,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.config import Settings
-from app.schemas import FinalForecast
+from app.exceptions import RuleViolationError
+from app.schemas import AntiHindsightStatus, FinalForecast
 from app.storage.models import ArtifactRecord, Base, ForecastRecord, RunRecord
 
 
@@ -90,6 +91,11 @@ class Storage:
 
     def save_forecast(self, run_id: str, forecast: FinalForecast) -> None:
         """Persist reviewed final forecast payload in structured storage."""
+        if forecast.anti_hindsight_status != AntiHindsightStatus.PASS:
+            raise RuleViolationError(
+                "Refusing to persist forecast because anti_hindsight_status is not PASS"
+            )
+
         with self._session_factory() as session:
             session.add(
                 ForecastRecord(

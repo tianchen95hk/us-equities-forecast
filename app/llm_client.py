@@ -59,44 +59,74 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
                 )
 
     def generate_json(self, task_name: str, system_prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
-        request_payload = {
-            "model": self._settings.llm_model,
-            "temperature": self._settings.llm_temperature,
-            "seed": 42,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {"task_name": task_name, "payload": payload},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                },
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self._settings.llm_api_key}",
-            "Content-Type": "application/json",
-        }
+        base_max_tokens = int(self._settings.llm_max_tokens) if self._settings.llm_max_tokens > 0 else 0
+        token_candidates: list[int] = [base_max_tokens] if base_max_tokens > 0 else [0]
+        if base_max_tokens > 0:
+            token_candidates.append(min(4096, max(base_max_tokens + 300, int(base_max_tokens * 1.8))))
 
-        try:
-            with httpx.Client(timeout=self._settings.llm_timeout_seconds) as client:
-                response = client.post(self._endpoint, headers=headers, json=request_payload)
-                response.raise_for_status()
-                body = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise LLMResponseError(f"LLM request failed for task `{task_name}`: {exc}") from exc
+        last_exc: Exception | None = None
+        for candidate_max_tokens in token_candidates:
+            request_payload = {
+                "model": self._settings.llm_model,
+                "temperature": self._settings.llm_temperature,
+                "seed": 42,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {"task_name": task_name, "payload": payload},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    },
+                ],
+            }
+            if candidate_max_tokens > 0:
+                request_payload["max_tokens"] = candidate_max_tokens
+            if self._settings.llm_provider == "minimax":
+                # MiniMax OpenAI-compatible API supports reasoning_split to keep
+                # reasoning content out of message.content and preserve clean JSON output.
+                request_payload["reasoning_split"] = True
 
-        try:
-            content = body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMResponseError(
-                f"Model response missing choices/message/content for task `{task_name}`"
-            ) from exc
+            headers = {
+                "Authorization": f"Bearer {self._settings.llm_api_key}",
+                "Content-Type": "application/json",
+            }
 
-        return _parse_json_or_raise(content=content, task_name=task_name)
+            try:
+                timeout = httpx.Timeout(
+                    connect=min(12.0, self._settings.llm_timeout_seconds),
+                    read=self._settings.llm_timeout_seconds,
+                    write=min(12.0, self._settings.llm_timeout_seconds),
+                    pool=min(12.0, self._settings.llm_timeout_seconds),
+                )
+                with httpx.Client(timeout=timeout) as client:
+                    response = client.post(self._endpoint, headers=headers, json=request_payload)
+                    response.raise_for_status()
+                    body = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                last_exc = LLMResponseError(f"LLM request failed for task `{task_name}`: {exc}")
+                continue
+
+            try:
+                content = body["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                last_exc = LLMResponseError(
+                    f"Model response missing choices/message/content for task `{task_name}`"
+                )
+                continue
+
+            try:
+                return _parse_json_or_raise(content=content, task_name=task_name)
+            except LLMResponseError as exc:
+                last_exc = exc
+                continue
+
+        if last_exc is None:
+            raise LLMResponseError(f"LLM request failed for task `{task_name}` with unknown error")
+        raise last_exc
 
 
 class MockLLMClient(BaseLLMClient):
@@ -528,6 +558,8 @@ def _extract_outer_json_object(text: str) -> str | None:
 
 def build_llm_client(settings: Settings) -> BaseLLMClient:
     """Factory for configured LLM backend."""
+    if settings.use_live_data and settings.strict_live_mode and settings.llm_provider == "mock":
+        raise ValueError("Strict live mode forbids LLM_PROVIDER=mock. Use minimax/openai/kimi.")
     if settings.llm_provider == "mock":
         return MockLLMClient()
     return OpenAICompatibleLLMClient(settings)

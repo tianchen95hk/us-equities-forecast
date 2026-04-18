@@ -86,6 +86,12 @@ def _pipeline_result_to_response(result: PipelineResult) -> dict[str, Any]:
         "market_snapshot": result.market_snapshot,
         "news_snapshot": result.news_snapshot,
         "reasoning_summary": result.reasoning_summary,
+        "state_snapshot": result.state_snapshot,
+        "confidence_snapshot": result.confidence_snapshot,
+        "runtime_assertions": result.runtime_assertions,
+        "analysis_flow": result.analysis_flow,
+        "analysis_variants": result.analysis_variants,
+        "publish_gate_report": result.publish_gate_report,
     }
     if result.final_forecast is not None:
         payload.update(
@@ -112,6 +118,8 @@ def run_cli(args: argparse.Namespace) -> int:
     settings = get_settings()
     if args.live:
         settings.use_live_data = True
+    if getattr(args, "allow_mock_fallback", False):
+        settings.strict_live_mode = False
 
     output_language = args.output_lang or settings.output_language
     output_style = args.output_style or settings.output_style
@@ -146,7 +154,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--news-file", default=None, help="Optional manual news JSON file")
     run_parser.add_argument("--market-file", default=None, help="Optional manual market JSON file")
     run_parser.add_argument("--forecast-horizon", default=None, help="Override forecast horizon")
-    run_parser.add_argument("--live", action="store_true", help="Attempt live APIs before mock fallback")
+    run_parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use live APIs for collectors/LLM (strict live mode default blocks mock fallback).",
+    )
+    run_parser.add_argument(
+        "--allow-mock-fallback",
+        action="store_true",
+        help="Allow falling back to mock data/provider when --live cannot complete.",
+    )
     run_parser.add_argument(
         "--max-news-age-hours",
         type=int,

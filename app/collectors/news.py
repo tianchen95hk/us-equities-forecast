@@ -38,16 +38,25 @@ def _fetch_live_news(settings: Settings) -> list[dict[str, Any]]:
         raise CollectorError("NEWS_API_KEY is required for live news fetching")
 
     params = {
-        "q": "(SPY OR QQQ OR IWM OR Federal Reserve OR Treasury yield OR DXY OR oil)",
+        "q": settings.live_news_query,
         "language": "en",
         "sortBy": "publishedAt",
-        "pageSize": 20,
+        "searchIn": "title,description",
+        "domains": ",".join(settings.live_news_domains),
+        "pageSize": max(1, int(settings.live_news_page_size)),
+        "from": settings.news_from_iso(),
         "apiKey": settings.news_api_key,
     }
     headers = {"User-Agent": settings.user_agent}
 
     try:
-        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+        timeout = httpx.Timeout(
+            connect=min(8.0, settings.request_timeout_seconds),
+            read=settings.request_timeout_seconds,
+            write=min(8.0, settings.request_timeout_seconds),
+            pool=min(8.0, settings.request_timeout_seconds),
+        )
+        with httpx.Client(timeout=timeout) as client:
             response = client.get(settings.news_api_url, params=params, headers=headers)
             response.raise_for_status()
             payload = response.json()
@@ -93,5 +102,10 @@ def collect_news(settings: Settings, manual_path: str | None = None) -> tuple[li
                 return latest_cached_news, "latest_available_cache"
         except CollectorError:
             pass
+
+        if settings.strict_live_mode:
+            raise CollectorError(
+                "Strict live mode enabled: failed to fetch live news and no latest cache available"
+            )
 
     return _load_news_file(settings.mock_news_file), "mock"

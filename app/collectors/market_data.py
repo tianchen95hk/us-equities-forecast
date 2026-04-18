@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,7 +129,13 @@ def _fetch_yahoo_indicator(settings: Settings, symbol: str) -> dict[str, Any]:
     headers = {"User-Agent": settings.user_agent}
 
     try:
-        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+        timeout = httpx.Timeout(
+            connect=min(8.0, settings.request_timeout_seconds),
+            read=settings.request_timeout_seconds,
+            write=min(8.0, settings.request_timeout_seconds),
+            pool=min(8.0, settings.request_timeout_seconds),
+        )
+        with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
             response.raise_for_status()
             payload = response.json()
@@ -293,14 +300,35 @@ def _fetch_fmp_market_data(settings: Settings) -> dict[str, dict[str, Any]]:
         return {}
 
     results: dict[str, dict[str, Any]] = {}
-    with httpx.Client(timeout=settings.request_timeout_seconds) as client:
-        for canonical_symbol in INDICATOR_NAMES:
-            try:
-                results[canonical_symbol] = _fetch_fmp_indicator(client, settings, canonical_symbol)
-            except CollectorError:
-                continue
-            except httpx.HTTPError:
-                continue
+    timeout = httpx.Timeout(
+        connect=min(8.0, settings.request_timeout_seconds),
+        read=settings.request_timeout_seconds,
+        write=min(8.0, settings.request_timeout_seconds),
+        pool=min(8.0, settings.request_timeout_seconds),
+    )
+
+    def _fetch_one(canonical_symbol: str) -> tuple[str, dict[str, Any] | None]:
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                item = _fetch_fmp_indicator(client, settings, canonical_symbol)
+                return canonical_symbol, item
+        except (CollectorError, httpx.HTTPError, ValueError):
+            return canonical_symbol, None
+
+    symbols = list(INDICATOR_NAMES.keys())
+    if settings.collect_in_parallel:
+        max_workers = min(4, len(symbols))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, symbol) for symbol in symbols]
+            for future in as_completed(futures):
+                symbol, item = future.result()
+                if item is not None:
+                    results[symbol] = item
+    else:
+        for symbol in symbols:
+            symbol_key, item = _fetch_one(symbol)
+            if item is not None:
+                results[symbol_key] = item
     return results
 
 
@@ -351,5 +379,10 @@ def collect_market_data(settings: Settings, manual_path: str | None = None) -> t
                 return latest_cached_market, "latest_available_cache"
         except CollectorError:
             pass
+
+        if settings.strict_live_mode:
+            raise CollectorError(
+                "Strict live mode enabled: failed to fetch live market data and no latest cache available"
+            )
 
     return _load_market_data_file(settings.mock_market_file), "mock"

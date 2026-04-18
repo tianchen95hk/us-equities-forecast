@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.exceptions import PipelineStepError
 from app.llm_client import BaseLLMClient, LLMResponseError
+from app.rules.anti_hindsight import validate_review_status_pair
 from app.schemas import (
     AntiHindsightReviewResult,
     ForecastDraft,
@@ -27,10 +28,15 @@ def run_anti_hindsight_review(
     forecast_draft: ForecastDraft,
     draft_rule_report: RuleCheckReport,
     output_language: str = "zh",
+    normalized_inputs_payload: dict[str, object] | None = None,
 ) -> AntiHindsightReviewResult:
     """Execute anti-hindsight review and return review artifact only."""
     payload = {
-        "normalized_inputs": normalized_inputs.model_dump(mode="json"),
+        "normalized_inputs": (
+            normalized_inputs_payload
+            if normalized_inputs_payload is not None
+            else normalized_inputs.model_dump(mode="json")
+        ),
         "state_mapping": state_mapping.model_dump(mode="json"),
         "forecast_draft": forecast_draft.model_dump(mode="json"),
         "rule_report": draft_rule_report.model_dump(mode="json"),
@@ -43,6 +49,14 @@ def run_anti_hindsight_review(
         try:
             response = llm_client.generate_json("anti_hindsight_review", prompt_template, payload)
             review_result = AntiHindsightReviewResult.model_validate(response)
+
+            status_issues = validate_review_status_pair(
+                review_result.anti_hindsight_status.value,
+                review_result.reviewed_forecast.anti_hindsight_status.value,
+            )
+            if status_issues:
+                raise ValueError(" | ".join(status_issues))
+
             if output_language.lower() == "zh":
                 if not _contains_cjk(review_result.reviewed_forecast.final_thesis):
                     raise ValueError("reviewed_forecast.final_thesis is not in Chinese")

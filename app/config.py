@@ -6,6 +6,7 @@ The project defaults to mock data and mock LLM output so it can run fully offlin
 from __future__ import annotations
 
 from functools import lru_cache
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -45,11 +46,16 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4.1-mini"
     llm_temperature: float = 0.0
     llm_timeout_seconds: float = 45.0
+    llm_max_tokens: int = 1200
+    llm_compact_news_items: int = 8
+    llm_compact_text_chars: int = 320
 
     output_language: Literal["zh", "en"] = "zh"
     output_style: Literal["simple", "telegram", "full"] = "simple"
 
     use_live_data: bool = False
+    strict_live_mode: bool = True
+    collect_in_parallel: bool = True
     request_timeout_seconds: float = 15.0
     user_agent: str = "macro-forecast-system/0.1"
     enforce_input_freshness: bool = True
@@ -64,6 +70,24 @@ class Settings(BaseSettings):
 
     news_api_key: str | None = None
     news_api_url: str = "https://newsapi.org/v2/everything"
+    live_news_page_size: int = 12
+    live_news_query: str = (
+        "\"S&P 500\" OR \"Nasdaq 100\" OR \"Russell 2000\" OR "
+        "\"VIX\" OR \"Federal Reserve\" OR \"10-year Treasury\" OR "
+        "\"US dollar index\" OR \"WTI crude\""
+    )
+    live_news_domains: list[str] = Field(
+        default_factory=lambda: [
+            "reuters.com",
+            "bloomberg.com",
+            "cnbc.com",
+            "wsj.com",
+            "ft.com",
+            "marketwatch.com",
+            "investing.com",
+            "barrons.com",
+        ]
+    )
 
     @field_validator("market_universe", mode="before")
     @classmethod
@@ -73,6 +97,20 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
         raise ValueError("market_universe must be a CSV string or list")
+
+    @field_validator("live_news_domains", mode="before")
+    @classmethod
+    def _coerce_live_news_domains(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        raise ValueError("live_news_domains must be a CSV string or list")
+
+    def news_from_iso(self) -> str:
+        """Return ISO timestamp lower bound for live news query window."""
+        from_dt = datetime.now(timezone.utc) - timedelta(hours=max(1, self.max_news_age_hours))
+        return from_dt.isoformat().replace("+00:00", "Z")
 
     def ensure_directories(self) -> None:
         """Create required local directories if they do not exist."""
